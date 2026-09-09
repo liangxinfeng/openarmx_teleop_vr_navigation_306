@@ -1,0 +1,35 @@
+:root {
+  color-scheme: dark;
+  font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  background: #05090c;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #05090c;
+}
+
+#monitor-canvas {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+}
+
+#loading {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 13px 20px;
+  border: 1px solid rgba(104, 225, 255, 0.35);
+  border-radius: 12px;
+  color: #d9f8ff;
+  background: rgba(4, 15, 20, 0.86);
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}

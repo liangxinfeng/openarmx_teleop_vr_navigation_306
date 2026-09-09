@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>openarmx_teleop_vr_navigation_306</name>
+  <version>0.1.0</version>
+  <description>VR teleoperation and lightweight navigation interface for robot 306.</description>
+  <maintainer email="ubuntu@example.com">Autolife Robotics</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>visualization_msgs</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <depend>control_center_navigation</depend>
+  <depend>openarmx_teleop_vr_306_v4</depend>
+  <exec_depend>autolife_s2_voice</exec_depend>
+  <exec_depend>text_voice_control</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-aiohttp</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

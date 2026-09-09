@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "height_levels": {
+    "1": "最低",
+    "2": "较低",
+    "3": "中等",
+    "4": "较高",
+    "5": "最高"
+  },
+  "showroom_mode": {
+    "single_waypoint_task": "展厅定点服务",
+    "body_height_level": 5
+  },
+  "task_templates": [
+    {
+      "id": "hotel_full_demo",
+      "name": "酒店服务完整演示",
+      "description": "迎宾、取水、清理垃圾、整理毛巾并送洗",
+      "tasks": [
+        {"location": "耗材区", "task": "洗手液归位"},
+        {"location": "毛巾区", "task": "毛巾放入洗衣篮"},
+        {"location": "置物区", "task": "箱子放在桌面"},
+        {"location": "洗衣区", "task": "毛巾放到洗衣机内"}
+      ]
+    },
+    {
+      "id": "hotel_cleaning_demo",
+      "name": "客房清洁演示",
+      "description": "清理垃圾、收纳毛巾并送往洗衣区",
+      "tasks": [
+        {"location": "毛巾区", "task": "毛巾放入洗衣篮"},
+        {"location": "洗衣区", "task": "毛巾放到洗衣机内"}
+      ]
+    },
+    {
+      "id": "welcome_delivery_demo",
+      "name": "迎宾配送演示",
+      "description": "接待来宾并完成前台取水",
+      "tasks": [
+        {"location": "毛巾区", "task": "毛巾放入洗衣篮"},
+        {"location": "洗衣区", "task": "毛巾放到洗衣机内"}
+      ]
+    }
+  ],
+  "task_locations": {
+    "置物区": [
+      {"task": "箱子放在桌面", "body_height_level": 5, "hints": ["把箱子放在桌面"]}
+    ],
+    "毛巾区": [
+      {"task": "毛巾放入洗衣篮", "body_height_level": 5, "hints": ["毛巾放入洗衣篮", "把毛巾放进洗衣篮", "把毛巾放进篮子", "把浴巾放进洗衣篮", "收毛巾", "收浴巾", "脏毛巾放篮子", "把布草装进篮子"]}
+    ],
+    "洗衣区": [
+      {"task": "毛巾放到洗衣机内", "body_height_level": 5, "hints": ["毛巾放到洗衣机内"]}
+    ],
+    "耗材区": [
+      {"task": "洗手液归位", "body_height_level": 5, "hints": ["洗手液归位", "把洗手液放回去", "洗手液放好", "收好洗手液", "洗手液摆回原位"]}
+    ]
+  }
+}

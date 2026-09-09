@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#02070c">
+  <title>云蝶 · 自主任务执行中心</title>
+  <link rel="stylesheet" href="audience.css?v=audience-v2">
+  <script src="audience.js?v=audience-v2" defer></script>
+</head>
+<body>
+  <main class="stage">
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+        <div>
+          <p class="eyebrow">YUNDIE AUTONOMOUS SERVICE SYSTEM</p>
+          <h1>云蝶 · 自主任务执行中心</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div id="system-pill" class="system-pill"><span></span><b>系统连接中</b></div>
+        <button id="fullscreen-button" class="fullscreen-button" type="button">全屏展示</button>
+      </div>
+    </header>
+
+    <section class="mission-banner" aria-live="polite">
+      <div class="mission-index"><span>MISSION</span><strong id="mission-number">00</strong></div>
+      <div class="mission-copy">
+        <p id="mission-stage">自主系统待命</p>
+        <h2 id="mission-title">等待任务链下发</h2>
+        <div class="mission-meta">
+          <span id="mission-location">当前位置 · 已就绪</span>
+          <span id="mission-progress">任务进度 · 0 / 0</span>
+        </div>
+      </div>
+      <div class="mission-orbit" aria-hidden="true"><i></i><i></i><i></i></div>
+    </section>
+
+    <section class="content-grid">
+      <article class="vision-panel panel-shell">
+        <div class="panel-heading">
+          <div><span>ROBOT VISION</span><strong>机器人实时视野</strong></div>
+          <div id="vision-state" class="data-state"><i></i>视觉链路连接中</div>
+        </div>
+        <div class="vision-viewport">
+          <canvas id="camera-canvas" width="640" height="480"></canvas>
+          <div class="vision-placeholder" id="vision-placeholder">
+            <div class="scanner"></div><span>正在接入机器人视觉</span>
+          </div>
+          <div class="focus-reticle" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+          <div class="vision-caption">
+            <span id="active-operation">环境感知中</span>
+            <small id="navigation-summary">自主定位系统准备就绪</small>
+          </div>
+        </div>
+        <div class="signal-row" aria-label="自主系统状态">
+          <span><i></i>环境感知</span><span><i></i>任务决策</span>
+          <span><i></i>自主导航</span><span><i></i>动作执行</span>
+        </div>
+      </article>
+
+      <aside class="side-stack">
+        <article class="timeline-panel panel-shell">
+          <div class="panel-heading">
+            <div><span>MISSION SEQUENCE</span><strong>自主任务序列</strong></div>
+            <div id="sequence-count" class="sequence-count">0 项任务</div>
+          </div>
+          <ol id="task-timeline" class="task-timeline">
+            <li class="empty-task"><span></span><p>等待生成任务路径</p></li>
+          </ol>
+        </article>
+
+        <article class="map-panel panel-shell">
+          <div class="panel-heading">
+            <div><span>SPATIAL AWARENESS</span><strong>空间定位</strong></div>
+            <div id="localization-state" class="data-state"><i></i>定位连接中</div>
+          </div>
+          <div class="map-viewport">
+            <canvas id="map-canvas" width="546" height="320"></canvas>
+            <div class="map-sweep" aria-hidden="true"></div>
+            <div class="map-caption"><b id="map-target">目标区域 · 待命</b><span id="map-distance">路径计算就绪</span></div>
+          </div>
+        </article>
+      </aside>
+    </section>
+
+    <footer class="footer-line">
+      <span id="clock">--:--:--</span>
+      <p>感知 · 决策 · 导航 · 执行</p>
+      <span id="link-summary">AUTONOMOUS LINK · CONNECTING</span>
+    </footer>
+  </main>
+</body>
+</html>
