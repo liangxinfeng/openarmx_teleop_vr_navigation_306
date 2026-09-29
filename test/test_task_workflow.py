@@ -26,13 +26,13 @@ def test_confirm_navigate_arrive_and_advance():
     ])
     workflow.confirm(["迎宾区", "电视区"])
     workflow.navigation_started()
-    assert workflow.navigation_arrived("迎宾区")["body_height_level"] == 5
+    assert workflow.navigation_arrived("迎宾区")["body_lowering_cm"] == 0
     assert workflow.snapshot()["state"] == "adjusting_height"
     workflow.height_adjusted()
     state, completed, upcoming = workflow.complete_action()
     assert state == "next"
     assert completed["task"] == "迎宾接待"
-    assert upcoming["body_height_level"] == 3
+    assert upcoming["body_lowering_cm"] == 28
     workflow.navigation_started()
     workflow.navigation_arrived("电视区")
     workflow.height_adjusted()
@@ -146,7 +146,7 @@ def test_showroom_single_waypoint_can_use_trusted_generic_task():
         allow_unlisted=True,
     )
     workflow.confirm(["临时航点"])
-    assert workflow.current()["body_height_level"] == 4
+    assert workflow.current()["body_lowering_cm"] == 14
 
 
 @pytest.mark.parametrize("state", [

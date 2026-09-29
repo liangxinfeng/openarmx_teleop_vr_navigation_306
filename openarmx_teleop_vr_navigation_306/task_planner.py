@@ -8,6 +8,7 @@ import re
 import sys
 
 import yaml
+from .simple_task_catalog import load_catalog
 
 
 PAIR_PATTERN = re.compile(
@@ -20,10 +21,10 @@ NEGATION_PATTERN = re.compile(r"(?:不要|不用|不需要|别去|别做|取消|
 
 
 class TaskPlanner:
-    def __init__(self, catalog_path, void_cog_root="/home/ubuntu/code/void-cog"):
+    def __init__(self, catalog_path, void_cog_root="/home/ubuntu/ros2_ws/external/void-cog", catalog=None):
         self.catalog_path = Path(catalog_path)
         self.void_cog_root = Path(void_cog_root)
-        self.catalog = json.loads(self.catalog_path.read_text(encoding="utf-8"))
+        self.catalog = load_catalog(self.catalog_path) if catalog is None else catalog
         self.tasks = []
         for location, entries in self.catalog.get("task_locations", {}).items():
             for entry in entries:
@@ -62,8 +63,7 @@ class TaskPlanner:
     def _prompt(self):
         table = "\n".join(
             (
-                f"- 地点：{item['location']}；任务：{item['task']}；"
-                f"用户常用说法：{'、'.join(item['hints'])}"
+                f"- 地点：{item['location']}；任务：{item['task']}"
             )
             for item in self.tasks
         )
@@ -83,20 +83,7 @@ class TaskPlanner:
 4. 每个任务只能绑定能力表中的原地点。用户明确说了错误地点时必须拒绝或追问，不能偷偷改到正确地点，也不能换任务；同句其他合法任务照常输出。
 5. 用户没说地点时，才可补全能力表中该任务的唯一地点。能力表外需求不输出标记。
 6. 标记必须放在回复末尾，任务与地点逐项成对出现。
-7. “用户常用说法”来自可热更新的任务库。用户不必逐字说出提示词，语义相同也应映射到对应任务；不得映射到其他任务。
-
-【关键示例】
-用户：把这个包裹送到存放物品的地方
-输出：好的，我把包裹送过去放好。[TASK:放置配送物品][LOCATION:配送区]
-
-用户：去物品区把要配送的盒子夹起来
-输出：好的，我去把盒子夹起来。[TASK:夹取配送物品][LOCATION:物品区]
-
-用户：去电视区给我拿杯水
-输出：拿水只能在前台区执行，请确认是否改去前台区。
-
-用户：我自己去拿水，你不用过去
-输出：好的，有需要再叫我。
+7. 用户可以使用口语表达。根据当前能力表理解语义，不依赖额外提示词；不确定时追问，不能猜测或套用旧地点。
 """
 
     @staticmethod

@@ -21,6 +21,7 @@ import numpy as np
 
 from .task_page import PAGE
 from .task_planner import TaskPlanner
+from .simple_task_catalog import load_catalog, task_settings
 
 
 UI_VERSION = "20260828-task-console-v14-order-layout"
@@ -45,6 +46,7 @@ class TaskVoiceServer:
         self.plan_revision = 0
         self.latest_generated_plan = {}
         self.catalog_revision = ""
+        self.catalog_error = ""
         self.catalog = {}
         self.catalog_tasks = []
         self.catalog_by_pair = {}
@@ -62,19 +64,32 @@ class TaskVoiceServer:
             (
                 str(item.get("task", "")),
                 str(item.get("location", "")),
-                int(item.get("body_height_level", 5)),
+                task_settings(item)["body_lowering_cm"],
+                task_settings(item)["automatic"],
+                task_settings(item)["head_pitch_deg"],
             )
             for item in tasks or []
             if isinstance(item, dict)
         )
 
     def reload_catalog(self, force=False):
+        try:
+            changed = self._reload_catalog_checked(force)
+            self.catalog_error = ''
+            return changed
+        except (OSError, TypeError, ValueError) as error:
+            self.catalog_error = str(error)
+            if self.planner is None:
+                self.planner = TaskPlanner(self.catalog_path, catalog={})
+            return False
+
+    def _reload_catalog_checked(self, force=False):
         """Reload the source catalog when it changes, without a rebuild."""
         stat = self.catalog_path.stat()
         revision = f"{stat.st_mtime_ns}-{stat.st_size}"
         if not force and revision == self.catalog_revision:
             return False
-        raw = json.loads(self.catalog_path.read_text(encoding="utf-8"))
+        raw = load_catalog(self.catalog_path)
         entries = []
         by_pair = {}
         for location, tasks in raw.get("task_locations", {}).items():
@@ -83,31 +98,26 @@ class TaskVoiceServer:
                 continue
             for entry in tasks:
                 if isinstance(entry, str):
-                    task, level = entry, 5
+                    task = entry
                 elif isinstance(entry, dict):
                     task = entry.get("task", "")
-                    level = entry.get("body_height_level", 5)
                 else:
                     continue
                 task = str(task).strip()
                 if not task:
                     continue
-                try:
-                    level = max(1, min(5, int(level)))
-                except (TypeError, ValueError):
-                    level = 5
                 item = {
                     "id": f"{location}::{task}",
                     "location": location,
                     "task": task,
-                    "body_height_level": level,
+                    **task_settings(entry if isinstance(entry, dict) else {}),
                 }
                 entries.append(item)
                 by_pair[(task, location)] = item
         if not entries:
             raise ValueError("任务库中没有有效的地点任务")
         previous_llm = getattr(self.planner, "_llm", None)
-        planner = TaskPlanner(self.catalog_path)
+        planner = TaskPlanner(self.catalog_path, catalog=raw)
         if previous_llm is not None:
             planner._llm = previous_llm
         self.planner = planner
@@ -121,13 +131,14 @@ class TaskVoiceServer:
         self.reload_catalog()
         return {
             "revision": self.catalog_revision,
+            "error": self.catalog_error,
             "version": self.catalog.get("version", 1),
-            "height_levels": self.catalog.get("height_levels", {}),
             "tasks": [dict(item) for item in self.catalog_tasks],
         }
 
     def _normalise_catalog_tasks(self, tasks):
         self.reload_catalog()
+        if self.catalog_error: raise ValueError(self.catalog_error)
         if not isinstance(tasks, list) or not tasks:
             raise ValueError("请至少选择一个任务")
         if len(tasks) > 30:
@@ -146,12 +157,13 @@ class TaskVoiceServer:
             result.append({
                 "task": configured["task"],
                 "location": configured["location"],
-                "body_height_level": configured["body_height_level"],
+                **task_settings(configured),
             })
         return result
 
     def _normalise_voice_tasks(self, tasks):
         self.reload_catalog()
+        if self.catalog_error: raise ValueError(self.catalog_error)
         result = []
         for raw in tasks or []:
             if not isinstance(raw, dict):
@@ -165,7 +177,7 @@ class TaskVoiceServer:
                 result.append({
                     "task": configured["task"],
                     "location": configured["location"],
-                    "body_height_level": configured["body_height_level"],
+                    **task_settings(configured),
                 })
         return result
 
@@ -202,8 +214,8 @@ class TaskVoiceServer:
     async def initialize(self):
         self.reload_catalog(force=True)
         await self.planner.initialize()
-        if "/home/ubuntu/code/void-cog" not in sys.path:
-            sys.path.insert(0, "/home/ubuntu/code/void-cog")
+        if "/home/ubuntu/ros2_ws/external/void-cog" not in sys.path:
+            sys.path.insert(0, "/home/ubuntu/ros2_ws/external/void-cog")
         from void_cog.services.asr.asr_sherpa import SherpaASRService
 
         self.asr = SherpaASRService()
@@ -265,6 +277,7 @@ class TaskVoiceServer:
 
     async def plan_and_dispatch(self, text):
         self.reload_catalog()
+        if self.catalog_error: raise ValueError(self.catalog_error)
         planned = await self.planner.plan(text)
         tasks = self._normalise_voice_tasks(planned.get("tasks", []))
         planned["server_epoch"] = self.server_epoch
@@ -452,9 +465,9 @@ class TaskVoiceServer:
 async def run(args):
     package = Path(get_package_share_directory("openarmx_teleop_vr_navigation_306"))
     source_catalog = Path(
-        "/home/ubuntu/ros2_ws/src/openarmx_teleop_vr_navigation_306/config/task_actions.json"
+        "/home/ubuntu/ros2_ws/src/openarmx_teleop_vr_navigation_306/config/task_actions.txt"
     )
-    catalog = source_catalog if source_catalog.is_file() else package / "config" / "task_actions.json"
+    catalog = source_catalog if source_catalog.is_file() else package / "config" / "task_actions.txt"
     server = TaskVoiceServer(catalog, args.dispatcher_url)
     await server.initialize()
     app = web.Application(client_max_size=12 * 1024 * 1024)

@@ -47,7 +47,7 @@ def test_manual_height_override_releases_operator_action_stage():
 
     bridge = SimpleNamespace(
         _task_height_lock=Lock(),
-        _task_height_target_level=5,
+        _task_height_target_m=0.0,
         _task_height_deadline=123.0,
         _task_height_stable_since=45.0,
         _task_workflow=workflow,
@@ -56,7 +56,7 @@ def test_manual_height_override_releases_operator_action_stage():
     released = NavigationVrWebBridge._release_task_height_for_manual_control(bridge)
 
     assert released is True
-    assert bridge._task_height_target_level is None
+    assert bridge._task_height_target_m is None
     assert bridge._task_height_deadline == 0.0
     assert bridge._task_height_stable_since == 0.0
     assert workflow.snapshot()['state'] == 'awaiting_action'
@@ -85,8 +85,10 @@ def test_vr_controls_include_deadman_and_navigation_actions():
     assert "'/api/navigation/waypoint'" in source
     assert "'/api/navigation/relocalize'" in source
     assert "'/api/navigation/stop'" in source
-    assert "'/api/tasks/skip-navigation-failure'" in source
-    assert 'setBaseControlLatched(!navUi.baseControlLatched)' in source
+    assert "'/api/tasks/operator-arrival'" in source
+    assert "'/api/tasks/skip-current'" in source
+    assert "navigationAction('/api/tasks/skip-navigation-failure')" not in source
+    assert 'setBaseControlLatched(!navUi.baseControlLatched, true, navUi.baseControlLatched)' in source
     assert 'const deadman = Boolean(navUi.baseControlLatched)' in source
     assert "'/api/navigation/waypoint/save'" in source
     assert "'/api/navigation/waypoint/delete'" in source
@@ -106,12 +108,14 @@ def test_vr_controls_include_deadman_and_navigation_actions():
     assert '松开 X 确认退出当前任务' in source
     assert '长按A完成动作 · 长按X退出任务' in source
     index = (Path(__file__).parents[1] / 'web' / 'index.html').read_text(encoding='utf-8')
-    assert 'nav_app.js?v=yundie-306-navigation-50-map-70-v47' in index
+    import re
+    version = re.search(r"NAVIGATION_ASSET_VERSION = '([^']+)'", source)[1]
+    assert f'nav_app.js?v={version}' in index
     assert 'manualRelocalizationMoveSpeed: 1.80' in source
     assert 'manualRelocalizationMoveSpeed || 1.80' in source
     assert "kind: 'map-library'" in source
     assert "navigationAction('/api/navigation/map/switch', { path })" in source
-    assert "path.includes('/map/switch') ? 15000 : 6500" in source
+    assert "path.includes('/map/switch')" in source and '? 15000 : 6500' in source
     assert 'drawForwardCorridorGuide()' in source
     assert '机器人前方 · 0.60 m' not in source
     assert "payload?.type === 'corridor_projection'" in source
@@ -122,7 +126,7 @@ def test_vr_controls_include_deadman_and_navigation_actions():
     assert 'context.lineWidth = 2.2' in source
     assert 'mapDisplayArea()' in source
     assert 'navUi.menuVisible = !navUi.menuVisible' in source
-    assert '按右摇杆键打开航点菜单' in source
+    assert '右摇杆键：菜单和地图' in source
     assert 'context.roundRect' not in source
     assert "panel.setAttribute('width', '2.3')" in source
     assert "panel.setAttribute('height', '1.725')" in source
@@ -145,10 +149,9 @@ def test_vr_controls_include_deadman_and_navigation_actions():
     assert '画面 ${actualFps.toFixed(1)} FPS' in source
     assert 'navUi.sessionActive = false' in source
     assert "kind: 'gripper-force'" in source
-    assert "fetch('/api/gripper/force'" in source
-    assert '夹爪力度已应用' in source
-    assert '夹爪力度设置失败' in source
-    assert 'adjustGripperForce(horizontalAxis > 0 ? 1 : -1)' in source
+    assert "fetch('/api/gripper/width'" in source
+    assert '闭合宽度' in source
+    assert 'adjustGripperWidth(horizontalAxis > 0 ? 1 : -1)' in source
     assert 'body_height_enabled: Boolean(deadman && bodyHeightEnabled)' in source
     assert 'bodyHeightDirection = xPressed ? 1 : -1' in source
     assert 'const quickResetChordPressed = xPressed && aPressed' in source
@@ -156,7 +159,7 @@ def test_vr_controls_include_deadman_and_navigation_actions():
     assert 'else if (!xPressed && !aPressed)' in source
     assert 'if (navUi.quickResetHeightSuppressed)' in source
     assert 'navUi.bodyHeightEngaged = false' in source
-    assert '!navUi.baseControlLatched && yPressed' in source
+    assert '!navUi.baseControlLatched && !yPressed && navUi.previous.y && !bPressed' in source
     assert "context.fillStyle = navUi.baseControlLatched ? '#72f0b1' : '#a9bbc5'" in source
     assert "new Worker('/drive_worker.js?v=navigation-21-drive-smooth')" in source
     assert "type: deadman ? 'sample' : 'release'" in source
@@ -166,21 +169,21 @@ def test_vr_controls_include_deadman_and_navigation_actions():
 
 def test_showroom_single_waypoint_voice_is_concise_and_location_based():
     task = {'location': '迎宾区', 'task': '展厅定点服务'}
-    assert task_voice_text('departure', task, True) == '前往迎宾区执行任务。'
-    assert task_voice_text('ready', task, True) == '已确认周围环境安全，开始执行任务。'
+    assert task_voice_text('departure', task, True) == '出发喽，前往迎宾区。'
+    assert task_voice_text('ready', task, True) == '准备就绪，开工啦。'
     assert task_voice_text('arrived', task, True) == (
-        '已到达迎宾区，已确认周围环境安全，开始执行任务。'
+        '迎宾区到了，准备开工。'
     )
-    assert task_voice_text('completed', task, True) == '迎宾区任务已完成。'
+    assert task_voice_text('completed', task, True) == '迎宾区任务完成啦。'
 
 
 def test_regular_task_voice_keeps_action_name():
     task = {'location': '前台区', 'task': '拿水'}
-    assert task_voice_text('departure', task, False) == '开始导航，前往前台区执行拿水。'
+    assert task_voice_text('departure', task, False) == '出发喽，去前台区，任务是拿水。'
     assert task_voice_text('arrived', task, False) == (
-        '已到达前台区，已确认周围环境安全，开始执行任务：拿水。'
+        '前台区到了，准备拿水。'
     )
-    assert task_voice_text('completed', task, False) == '拿水已完成。'
+    assert task_voice_text('completed', task, False) == '拿水完成啦。'
 
 
 def test_arrival_voice_is_single_combined_message():
@@ -254,14 +257,17 @@ def test_showroom_and_control_center_voice_are_mutually_exclusive():
         should_forward_control_center_voice,
     )
 
-    assert should_forward_control_center_voice(False) is True
+    assert should_forward_control_center_voice(False) is False
     assert should_forward_control_center_voice(True) is False
+    assert should_forward_control_center_voice(False, True) is True
+    assert should_forward_control_center_voice(True, True) is False
+    assert should_forward_control_center_voice(False, True, True) is False
     bridge = (
         Path(__file__).parents[1]
         / 'openarmx_teleop_vr_navigation_306'
         / 'navigation_web_bridge.py'
     ).read_text(encoding='utf-8')
-    assert 'if not self._showroom_mode_enabled or not text or not rclpy.ok()' in bridge
+    assert "if not getattr(self, '_voice_enabled', False) or not text or not rclpy.ok()" in bridge
     assert 'self._publish_showroom_mode()' in bridge
 
 
@@ -278,7 +284,7 @@ def test_bridge_uses_real_vendor_gripper_force_ratio_and_private_height_topic():
     assert 'openarmx_teleop_vr_306_v3' not in source
     assert "'enabled': height_enabled" in source
     assert "'direction': height_direction" in source
-    assert "json.dumps({'force': ratio}" in source
+    assert "json.dumps({'force': vendor_force}" in source
     assert 'get_subscription_count() < 1' in source
     assert "'manual_override_topic', '/manual_cmd_vel_active'" in source
     assert "'drive_watchdog_seconds', 0.36" in source
@@ -326,13 +332,14 @@ def test_gripper_force_ratio_is_bounded_and_published_to_both_hands():
         _left_gripper_force_publisher=left,
         _right_gripper_force_publisher=right,
         _gripper_force_ratio=1.0,
+        _gripper_vendor_force=NavigationVrWebBridge._gripper_vendor_force,
         get_parameter=lambda _name: SimpleNamespace(value=0.0),
     )
     ratio = NavigationVrWebBridge._set_gripper_force_ratio(
-        bridge, {'ratio': 0.6}
+        bridge, {'ratio': 0.35}
     )
-    assert ratio == 0.6
-    assert left.messages == ['{"force":0.6}']
+    assert ratio == 0.35
+    assert left.messages == ['{"force":0.035}']
     assert right.messages == left.messages
 
     import pytest
@@ -519,7 +526,8 @@ def test_navigation_web_client_uses_y_for_camera_and_b_for_head_lock():
     assert 'if (currentB && !this.cameraTogglePressed) toggleCameraMode()' not in source
     assert 'autolifeCameraModeToggleHandler' in source
     assert 'globalThis.autolifeHeadFollowControl' in source
-    assert 'if (bPressed && !navUi.previous.b) toggleHeadMotionLock()' in navigation
+    assert 'if (!bPressed && navUi.previous.b && !yPressed) toggleHeadMotionLock()' in navigation
+    assert '(yPressed && bPressed) || navUi.holdGripperResetChord' in navigation
     assert "modes.push('depth_cloud')" not in navigation
     assert "modes.push('precision_cloud')" in navigation
     assert 'connectDepthCloud()' in navigation
@@ -537,7 +545,7 @@ def test_navigation_web_client_uses_y_for_camera_and_b_for_head_lock():
     assert 'navUi.depthGeometry.setDrawRange(0, validPoints)' in navigation
     assert "? 'official_rgb565_points_3d' : 'disabled'" in navigation
     assert 'depth_last_error: String(navUi.depthLastError' in navigation
-    assert "NAVIGATION_ASSET_VERSION = 'yundie-306-navigation-50-map-70-v47'" in navigation
+    assert 'const NAVIGATION_ASSET_VERSION = ' in navigation
     assert 'function depthCloudIsReady(' in navigation
     assert 'return navUi.depthValidPoints > 0 && navUi.depthLastFrameAt > 0' in navigation
     assert 'const rgbFallback = selected && !ready' in navigation
@@ -688,7 +696,8 @@ def test_manual_drive_release_resumes_navigation_without_voice_prompt():
     bridge = (
         root / 'openarmx_teleop_vr_navigation_306' / 'navigation_web_bridge.py'
     ).read_text(encoding='utf-8')
-    assert "Navigation resumed after manual base takeover" in bridge
+    assert 'async def _api_release_drive' in bridge
+    assert '_resume_after_drive(now)' not in bridge
     assert "手动接管结束，继续前往任务地点。" not in bridge
 
 

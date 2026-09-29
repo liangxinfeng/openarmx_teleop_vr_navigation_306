@@ -274,7 +274,7 @@ function drawMenu(view) {
   if (!view.menu_visible) {
     roundRect(context, 891, 91, 284, 43, 11, 'rgba(4,18,27,0.78)');
     context.fillStyle = '#d9f8ff'; context.font = '18px sans-serif';
-    context.fillText('按右摇杆键打开航点菜单', 910, 119);
+    context.fillText('右摇杆键：菜单和地图', 910, 119);
     return;
   }
   roundRect(context, 846, 88, 330, 446, 17, 'rgba(4,18,27,0.88)');
@@ -291,7 +291,7 @@ function drawMenu(view) {
   }
   context.fillStyle = '#68e1ff'; context.font = '16px sans-serif';
   context.fillText('右摇杆上下选择 · 力度项左右调节', 864, 423);
-  context.fillText('按右摇杆键关闭菜单', 864, 452);
+  context.fillText('按右摇杆键收起菜单和地图', 864, 452);
   context.fillText('X 全局重定位', 864, 481);
 }
 
@@ -317,7 +317,8 @@ function drawTaskDispatch() {
     context.fillStyle = '#eefbff'; context.font = 'bold 19px sans-serif';
     context.fillText(`${current.location} · ${current.task}`.slice(0, 23), 442, 140);
     context.fillStyle = '#b8d7e1'; context.font = '16px sans-serif';
-    context.fillText(`身体高度：${current.body_height_level}档`, 442, 168);
+    const lowering = Number(current.body_lowering_cm);
+    context.fillText(`身体下降：${Number.isFinite(lowering) ? `${lowering}cm` : '未设置'}`, 442, 168);
   }
   context.fillStyle = pending ? '#ffd276' : '#9edbea';
   context.font = 'bold 16px sans-serif';
@@ -349,6 +350,7 @@ function drawVrHud() {
   context.fillStyle = view.head_following ? '#72f0b1' : '#ffcf70';
   context.fillText(view.head_following ? 'B · 头部跟随' : 'B · 头部已锁定', 820, 44);
 
+  if (view.menu_visible || view.manual_relocalization || view.naming_active) {
   const mapArea = mapDisplayArea();
   drawMap(mapArea, view);
   roundRect(context, mapArea.x + 10, mapArea.y + 10, 112, 31, 8, 'rgba(4,18,27,0.82)');
@@ -361,6 +363,7 @@ function drawVrHud() {
   context.fillText(monitor.navigation?.pose_fresh ? '● 定位实时'
     : (monitor.navigation?.pose ? '● 显示最近位置' : '● 等待首次定位'),
   mapArea.x + 20, mapArea.y + mapArea.h - 19);
+  }
 
   drawMenu(view);
   drawTaskDispatch();

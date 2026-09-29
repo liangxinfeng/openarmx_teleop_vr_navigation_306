@@ -70,7 +70,7 @@ def generate_launch_description():
             # time scaling: velocity x1.5, acceleration x1.5^2 and jerk
             # x1.5^3, producing an approximately 1.5x faster synchronized
             # Ruckig reset without changing targets or joint bounds.
-            'body_height_lowering_rate_m_sec': '0.15',
+            'body_height_lowering_rate_m_sec': '0.18',
             'quick_reset_max_velocity_deg_sec': '35.1',
             'quick_reset_max_acceleration_deg_sec2': '146.25',
             'quick_reset_max_jerk_deg_sec3': '1096.875',
@@ -79,7 +79,7 @@ def generate_launch_description():
             'quick_reset_neck_max_jerk_deg_sec3': '1406.25',
             # ~/vr306nav reset/head-follow neutral looks down 20 degrees.
             # The standalone ~/vr306 launch keeps its original zero target.
-            'quick_reset_neck_joints': '[0.0, -20.0, 0.0]',
+            'quick_reset_neck_joints': '[0.010928,-29.998649,0.010928]',
             'head_neutral_joints_deg': '[0.0, -20.0, 0.0]',
             # Every hardware-enable and X+A reset ends with the neck held.
             # The operator explicitly hands head motion back with VR button B.
@@ -198,7 +198,7 @@ def generate_launch_description():
         DeclareLaunchArgument('task_voice_port', default_value='8766'),
         DeclareLaunchArgument(
             'robot_env_python',
-            default_value='/home/ubuntu/miniconda3/envs/robot_env/bin/python',
+            default_value='/home/ubuntu/ros2_ws/venvs/openarmx_v4_placo/bin/python',
         ),
         navigation,
         voice_mode_router,

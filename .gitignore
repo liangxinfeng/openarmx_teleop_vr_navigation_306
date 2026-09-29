@@ -23,3 +23,9 @@ __pycache__/
 *.mcap
 .DS_Store
 Thumbs.db
+
+# Local-only files excluded from the robot307 publication
+.map_trash/
+.map_backups/
+.zcode_backups/
+*.pre-*

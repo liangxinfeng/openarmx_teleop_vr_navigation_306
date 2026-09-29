@@ -1,0 +1,441 @@
+{
+  "robot": "307",
+  "source_package": "openarmx_teleop_vr_navigation_306",
+  "snapshot_date": "2026-09-29",
+  "files": [
+    {
+      "path": ".gitattributes",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "57a0867a14dd254d2a11b045602d663da458ee0c",
+      "size": 114
+    },
+    {
+      "path": ".gitignore",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "631b6e2ec031cfa39d5c8ceff7bf76c4640d201d",
+      "size": 310
+    },
+    {
+      "path": "README.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "22186d57946736ca86a8d590cb25b48b93c7ef5f",
+      "size": 1916
+    },
+    {
+      "path": "SYNC_ENABLE_GRIPPER.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "1807c0a521dee59d5a7cfc03df47707b93defbca",
+      "size": 950
+    },
+    {
+      "path": "TASKS_283.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "744d6e3da231dbfc0532e52e3b11037334a202e4",
+      "size": 1903
+    },
+    {
+      "path": "VR_EXIT_SINGLE_RESET.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "f26c0386b5a12a8d155a7f07b3f292321431dcc6",
+      "size": 2619
+    },
+    {
+      "path": "VR_EXIT_SYNC.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ecc16ef2d5e2ea0ced00f386984e87df212762b9",
+      "size": 756
+    },
+    {
+      "path": "VR_SINGLE_TARGET_ENABLE.md",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "638b8c8bdc4ab1abd55c15f69a578758ca325287",
+      "size": 2047
+    },
+    {
+      "path": "config/delivery_handoff.json",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5786fc38f313db182aaa42ef3d630b1666806f44",
+      "size": 717
+    },
+    {
+      "path": "config/task_actions.json",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6b573ff1e82b2a6854c4c94f9d8b18ccdcda1511",
+      "size": 4257
+    },
+    {
+      "path": "config/task_actions.txt",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "44247f14b767842099529ac00eeab59f14445968",
+      "size": 1209
+    },
+    {
+      "path": "config/task_actions1.json",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8cc86e91cd1894e3b5e7af97c909cdd3baa85fd4",
+      "size": 2110
+    },
+    {
+      "path": "launch/full_vr_navigation.launch.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "3c55d2423787fdae59dec936f97e3fda901309c0",
+      "size": 9656
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/__init__.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "bc67b264606c64659852cef93407d59e2a905bec",
+      "size": 78
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/corridor_projection_node.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "93ae567b73970b2ced69265e1a2fe43310164927",
+      "size": 26423
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/delivery_handoff.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "05b357ea38bade1af156f743c0d00e0e9e7f3997",
+      "size": 35827
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/depth_cloud_stream.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "ab9c3842abd997646ef9e55066e118272cb89723",
+      "size": 15616
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/navigation_web_bridge.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "430c158771a4c5a70134de95f7d6323b0aef1f67",
+      "size": 138360
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/session_controls.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4f947e229e4b0de6e458d9c05090416f5bccca65",
+      "size": 1953
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/simple_task_catalog.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "07bb80f4e002eeb50f6581ca23b6268a658d85cd",
+      "size": 4996
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/task_page.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a3629d498c4efcabfe0ed949ef5c6a8390c3559",
+      "size": 33172
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/task_planner.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "67e3afe06b237f717dad9199e85311b3230bf62b",
+      "size": 10276
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/task_speech_node.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "413a1ce7974f15bddd3259a11fc8a73bfcca67cf",
+      "size": 6549
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/task_voice_web.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fa25b41cd88cf03c007adb43363423753122f2ec",
+      "size": 20426
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/task_workflow.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c3baeaf7118418f096725c5461bb5ab92b6d0707",
+      "size": 13112
+    },
+    {
+      "path": "openarmx_teleop_vr_navigation_306/voice_mode_router.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "c0acbbf80198a0a50547341120eed66e81439a06",
+      "size": 3888
+    },
+    {
+      "path": "package.xml",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4c6cc838f534abfbb7c7d400f49c322c40b83501",
+      "size": 1349
+    },
+    {
+      "path": "resource/openarmx_teleop_vr_navigation_306",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8b137891791fe96927ad78e64b0aad7bded08bdc",
+      "size": 1
+    },
+    {
+      "path": "scripts/start_vr_navigation_306.sh",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a1f4033050c885a59ba3bb27a493fa41fff82cc4",
+      "size": 7427
+    },
+    {
+      "path": "scripts/vr_navigation_desktop_app.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "800520f27ae90e1a4ada90380d3486e59a8f38ae",
+      "size": 18669
+    },
+    {
+      "path": "setup.cfg",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4c449d482c55bd7ff067f08961e77d17d75bcd33",
+      "size": 135
+    },
+    {
+      "path": "setup.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "14f6412fc89e9520f6b6b599c5fc1d5ff12bd4a7",
+      "size": 1511
+    },
+    {
+      "path": "test/probe_real_handoff.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "04ad712ddf88248e376e04f3046e61be367819c3",
+      "size": 1152
+    },
+    {
+      "path": "test/smoke_bridge_delivery.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "26068066b829aedb00e0e1f65445f60fb1e88e91",
+      "size": 16573
+    },
+    {
+      "path": "test/test_delivery_arrival.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4f291ca86511ffdc51023c09a91960cf198a3bcf",
+      "size": 2238
+    },
+    {
+      "path": "test/test_delivery_arrival_keys.cjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "917ac412b088fb77b0d998996f3afd883acdda3d",
+      "size": 3239
+    },
+    {
+      "path": "test/test_delivery_close.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "35785e59e6e2ac609d50b22169d94e3fd1bb6ddf",
+      "size": 4187
+    },
+    {
+      "path": "test/test_delivery_close_keys.cjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "639b1373fad753e8318df60dfd65ce03993e04a2",
+      "size": 1937
+    },
+    {
+      "path": "test/test_delivery_handoff.py",
+      "mode": "100755",
+      "type": "blob",
+      "sha": "786917bdabe32d7b14eed6c85e602e775b5d1050",
+      "size": 20831
+    },
+    {
+      "path": "test/test_delivery_offer.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "47be74b51f746679ad00dbf9e2b4a9adac7b46aa",
+      "size": 6070
+    },
+    {
+      "path": "test/test_delivery_offer_keys.cjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6f280466677196524eb638890f644f6774121b3b",
+      "size": 2224
+    },
+    {
+      "path": "test/test_navigation_logic.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "45ef8c74981c2ddf467ef1fdace31f911818e0e7",
+      "size": 34281
+    },
+    {
+      "path": "test/test_operator_intervention.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "6e86fc0ba123d3dee54dcf5e35da3a46076bf0e6",
+      "size": 8297
+    },
+    {
+      "path": "test/test_operator_keys.cjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "25933a118ed12df1d77411a730477b978c096390",
+      "size": 2429
+    },
+    {
+      "path": "test/test_simple_task_catalog.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "d23134bf3fceb606630f793ba0c017efccb40953",
+      "size": 6150
+    },
+    {
+      "path": "test/test_task_head_pose.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "040039a036fe867e36a10ec1ed69377e0cf8b31c",
+      "size": 7834
+    },
+    {
+      "path": "test/test_task_height_feedback.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "a07a37300b9c210b3dea3980c7fd378f400a917a",
+      "size": 6960
+    },
+    {
+      "path": "test/test_task_live_refresh_session.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "01205e589416add34bcbc123401a0b2160a0a024",
+      "size": 9215
+    },
+    {
+      "path": "test/test_task_workflow.py",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0a67487b115fdc81b15e745e2b4f4346948ed911",
+      "size": 6061
+    },
+    {
+      "path": "test/test_yb_chord.cjs",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "92877b460b0607854937d53302af0ea397ef204f",
+      "size": 1508
+    },
+    {
+      "path": "web/audience.css",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "8df7e496a7fc3c6cde6f2e7d8253f57b74dc17bc",
+      "size": 13270
+    },
+    {
+      "path": "web/audience.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "0f58c9e55e03b599c9456788c247247252e1dd4a",
+      "size": 4104
+    },
+    {
+      "path": "web/audience.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "fcc4d52ede86a229f0402d5b1adf70a7aa308d4c",
+      "size": 12695
+    },
+    {
+      "path": "web/drive_worker.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5876f97c2c0a53c78d9508125ab9c91a5cf50cbe",
+      "size": 3097
+    },
+    {
+      "path": "web/index.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "621e8a980dcc8c840d538e3a96d6b535c68fe2d3",
+      "size": 4671
+    },
+    {
+      "path": "web/monitor.css",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "5f7d22feb0d48981c2f2429438c4b9e22df79f56",
+      "size": 618
+    },
+    {
+      "path": "web/monitor.html",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "280e0980a576c56fd9b4f92eb44ea9d410273494",
+      "size": 435
+    },
+    {
+      "path": "web/monitor.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "28fb5c70db8015a827f0b4f75ced4df59c4645b4",
+      "size": 21986
+    },
+    {
+      "path": "web/nav_app.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "7b190c0cba5c2ad2d2cabb656320e1feb5ed1e96",
+      "size": 133973
+    },
+    {
+      "path": "web/nav_styles.css",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "dafbc3827c6e5a31514bb131e9536ced2a674956",
+      "size": 275
+    },
+    {
+      "path": "web/vr_app.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "4ed18a217800a36610937d99448789cda845d0e7",
+      "size": 96285
+    },
+    {
+      "path": "web/vr_custom_controls.js",
+      "mode": "100644",
+      "type": "blob",
+      "sha": "09996da6d4da670c5d2f975b131117d9d882a252",
+      "size": 11416
+    }
+  ]
+}

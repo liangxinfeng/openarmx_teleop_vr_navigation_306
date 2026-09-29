@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import threading
 import time
+import uuid
+from .simple_task_catalog import task_settings
 
 
 ACTIVE_STATES = {
@@ -15,14 +17,14 @@ ACTIVE_STATES = {
 
 def task_chain_templates(catalog):
     """Return validated task-chain templates from the shared task catalog."""
-    capabilities = set()
+    capabilities = {}
     for location, entries in catalog.get("task_locations", {}).items():
         location = str(location).strip()
         for entry in entries:
             task = entry if isinstance(entry, str) else entry.get("task", "")
             task = str(task).strip()
             if location and task:
-                capabilities.add((location, task))
+                capabilities[(location, task)] = entry if isinstance(entry, dict) else {}
 
     templates = []
     identifiers = set()
@@ -41,7 +43,8 @@ def task_chain_templates(catalog):
             task = str(task_item.get("task", "")).strip()
             if (location, task) not in capabilities:
                 raise ValueError(f"预设任务链“{name}”包含未知任务：{location} / {task}")
-            tasks.append({"location": location, "task": task})
+            tasks.append({"location": location, "task": task,
+                          **task_settings({**capabilities[(location, task)], **task_item})})
         if not tasks:
             raise ValueError(f"预设任务链“{name}”不能为空")
         identifiers.add(identifier)
@@ -58,7 +61,7 @@ def task_chain_templates(catalog):
 def navigation_terminal_outcome(state):
     """Normalize regular Nav2 and short-distance servo terminal states."""
     state = str(state or "").strip().lower()
-    if state in {"succeeded", "succeeded_by_tolerance"} or state.endswith("_succeeded"):
+    if state in {"succeeded", "operator_arrived", "succeeded_by_tolerance", "docked", "docked_by_charge_status", "docked_pose"} or state.endswith("_succeeded"):
         return "succeeded"
     if (
         state in {"failed", "rejected", "canceled", "cancelled"}
@@ -81,9 +84,7 @@ class TaskWorkflow:
                     entry = {"task": entry, "body_height_level": 5}
                 task = str(entry.get("task", "")).strip()
                 if task and location:
-                    self._catalog[(task, str(location).strip())] = max(
-                        1, min(5, int(entry.get("body_height_level", 5)))
-                    )
+                    self._catalog[(task, str(location).strip())] = task_settings(entry)
         self._version = 0
         self._state = "idle"
         self._source_text = ""
@@ -91,6 +92,7 @@ class TaskWorkflow:
         self._index = -1
         self._message = "等待网页端分发任务"
         self._updated_at = time.time()
+        self._execution_id = ''
 
     def _touch(self, message=None):
         self._version += 1
@@ -106,20 +108,20 @@ class TaskWorkflow:
             for item in tasks:
                 task = str(item.get("task", "")).strip()
                 location = str(item.get("location", "")).strip()
-                level = self._catalog.get((task, location))
-                if level is None and not allow_unlisted:
+                settings = self._catalog.get((task, location))
+                if settings is None and not allow_unlisted:
                     raise ValueError(f"任务不在能力库中：{location} / {task}")
-                if level is None:
-                    level = max(1, min(5, int(item.get("body_height_level", 5))))
+                settings = task_settings({**(settings or {}), **item})
                 accepted.append({
                     "task": task,
                     "location": location,
-                    "body_height_level": level,
+                    **settings,
                 })
             if not accepted:
                 raise ValueError("没有可分发的有效任务")
             self._source_text = str(source_text).strip()[:1000]
             self._tasks = accepted
+            self._execution_id = uuid.uuid4().hex
             self._index = 0
             self._state = "pending_confirmation"
             self._touch(f"收到{len(accepted)}项任务，等待VR遥操者确认分发")
@@ -144,6 +146,23 @@ class TaskWorkflow:
             self._state = "navigating"
             current = self._tasks[self._index]
             self._touch(f"正在前往{current['location']}")
+
+    def navigation_resumed(self, waypoint_name):
+        with self._lock:
+            if self._state not in {'navigating', 'navigation_failed'} or self._index < 0:
+                return False
+            if self._tasks[self._index]['location'] != waypoint_name:
+                return False
+            self._state = 'navigating'
+            self._touch(f'继续前往{waypoint_name}')
+            return True
+
+    def skip_current(self):
+        with self._lock:
+            if self._state not in {'navigating', 'navigation_failed', 'adjusting_height', 'awaiting_action', 'failed'}:
+                raise RuntimeError('当前任务不可跳过')
+            self._state = 'navigation_failed'
+            return self.skip_navigation_failure()
 
     def navigation_failed(self, message):
         with self._lock:
@@ -208,15 +227,16 @@ class TaskWorkflow:
             )
             return True
 
-    def navigation_arrived(self, waypoint_name=""):
+    def navigation_arrived(self, waypoint_name="", operator=False):
         with self._lock:
-            if self._state != "navigating":
+            if self._state != "navigating" and not (operator and self._state == 'navigation_failed'):
                 return None
             current = self._tasks[self._index]
             if waypoint_name and waypoint_name != current["location"]:
                 return None
             self._state = "adjusting_height"
-            self._touch(f"已到达{current['location']}，正在确认任务执行条件")
+            self._touch(f"{'人工确认到达' if operator else '已到达'}{current['location']}，正在确认任务执行条件")
+            current['operator_arrived'] = bool(operator)
             return copy.deepcopy(current)
 
     def height_adjusted(self):
@@ -225,7 +245,10 @@ class TaskWorkflow:
                 return None
             current = copy.deepcopy(self._tasks[self._index])
             self._state = "awaiting_action"
-            self._touch(f"已确认周围环境安全，开始执行{current['task']}")
+            self._touch(
+                f"自动动作尚未部署，请人工执行{current['task']}，完成后长按A"
+                if current.get('automatic') else f"任务姿态已就绪，开始执行{current['task']}"
+            )
             return current
 
     def height_failed(self, message):
@@ -274,6 +297,7 @@ class TaskWorkflow:
                 "source_text": self._source_text,
                 "tasks": copy.deepcopy(self._tasks),
                 "current_index": self._index,
+                "task_token": f'{self._execution_id}:{self._index}',
                 "current": current,
                 "total": len(self._tasks),
                 "message": self._message,
