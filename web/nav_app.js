@@ -1,6 +1,6 @@
 /* Lightweight VR navigation surface layered on the proven teleop client. */
 
-const NAVIGATION_ASSET_VERSION = 'yundie-306-navigation-50-map-70-v47';
+const NAVIGATION_ASSET_VERSION = 'yundie-300-template-start-v2026101401';
 
 const navUi = {
   enabled: false,
@@ -64,11 +64,8 @@ const navUi = {
   pollTimer: null,
   pollPending: false,
   actionPending: false,
-  gripperForceRatio: 1.0,
-  gripperForceMinimumRatio: 0.2,
-  gripperForceMaximumCurrent: 10.0,
-  gripperForceStep: 0.1,
-  gripperForceRequestId: 0,
+  gripperWidthCm: 0.0,
+  gripperWidthBusy: false,
   forceAdjustLatch: false,
   bodyHeightEngaged: false,
   quickResetHeightSuppressed: false,
@@ -88,6 +85,7 @@ const navUi = {
   templateMode: false,
   templateConfirmId: null,
   templateConfirmName: null,
+  templateStartIndex: 0,
   showroomModeEnabled: false,
   manualRelocalization: null,
   manualRelocalizationMoveSpeed: 1.80,
@@ -98,6 +96,7 @@ const navUi = {
   taskAcceptPending: false,
   taskHoldStartedAt: 0,
   taskHoldMode: '',
+  taskHoldToken: '',
   taskCompleteLatched: false,
   taskHoldCancelled: false,
   taskSkipHoldStartedAt: 0,
@@ -112,7 +111,19 @@ const navUi = {
   lastDriveSentAt: 0,
   previous: { y: false, a: false, b: false, x: false, leftStick: false, rightStick: false },
   selectionLatch: false,
-  statusLine: '正在等待导航数据…'
+  statusLine: '正在等待导航数据…',
+  deliveryMode: false,
+  deliveryOpenConfirm: false,
+  deliveryNoticeKey: '',
+  deliveryUiVisible: false,
+  deliveryCardActive: false,
+  deliveryCardArmed: false,
+  washConfirm: false,
+  dryConfirm: false,
+  deliveryReturnConfirm: false,
+  deliveryChainNoteKey: '',
+  deliveryOfferArmed: false,
+  deliveryOfferKey: ''
 };
 
 // Camera-local metres. Moving every coplanar HUD layer together preserves
@@ -131,6 +142,138 @@ const WAYPOINT_NAME_KEYS = [
   { label: '保存', action: 'save' }
 ];
 const WAYPOINT_NAME_COLUMNS = 6;
+
+// Delivery-robot handoff block published by the bridge in
+// /api/navigation/state. Null when the feature is not configured.
+function deliveryHandoff() {
+  const handoff = navUi.state?.delivery_handoff;
+  return handoff && typeof handoff === 'object' ? handoff : null;
+}
+
+// Do not let a new order steal A/X from an active task or chassis control.
+function deliveryOfferPending() {
+  return Boolean(
+    navUi.sessionActive
+      && deliveryHandoff()?.offer?.state === 'offered'
+      && ['idle', 'cancelled', 'completed'].includes(navUi.state?.task_dispatch?.state || 'idle')
+      && !navUi.baseControlLatched
+  );
+}
+
+function deliveryDoorPayload() {
+  const h = deliveryHandoff() || {};
+  return {client_id: globalThis.autolifeVrClientId?.() || '',
+    order_id: h.order_id, task_id: h.task_id, door_id: h.door_id};
+}
+
+// The arrival card owns A/X until release. A is a short press (on release),
+// never also a mission-complete gesture. Reset chords retain their meaning.
+function handleDeliveryArrivalInput(a, x, y, b, now) {
+  const h = deliveryHandoff();
+  const active = navUi.sessionActive && navUi.deliveryCardActive
+    && !navUi.baseControlLatched && !deliveryOfferPending();
+  const key = active ? `${h?.task_id || ''}:${h?.door_id || ''}` : '';
+  if (key !== navUi.deliveryArrivalInputKey) {
+    navUi.deliveryArrivalInputKey = key;
+    navUi.deliveryArrivalReady = false;
+    navUi.deliveryArrivalDownAt = null;
+  }
+  if ((a && x) || y || b) {
+    navUi.deliveryArrivalReady = false;
+    navUi.deliveryArrivalDownAt = null;
+    return false;
+  }
+  if (navUi.deliveryArrivalConsume) {
+    if (!a && !x) navUi.deliveryArrivalConsume = false;
+    return true;
+  }
+  if (!active) return false;
+  // A card appearing mid-gesture must not inherit the mission's held keys.
+  navUi.taskHoldCancelled = true;
+  navUi.taskRejectCancelled = true;
+  navUi.taskCompleteLatched = false;
+  navUi.taskRejectLatched = false;
+  if (!navUi.deliveryArrivalReady) {
+    if (!a && !x) navUi.deliveryArrivalReady = true;
+    return true;
+  }
+  if (x && !navUi.previous.x) {
+    navUi.deliveryCardActive = false;
+    navUi.deliveryArrivalConsume = true;
+    navUi.deliveryArrivalDownAt = null;
+    drawNavigationPanel();
+    return true;
+  }
+  if (a && !navUi.previous.a) navUi.deliveryArrivalDownAt = now;
+  if (!a && navUi.previous.a && navUi.deliveryArrivalDownAt != null) {
+    const held = now - navUi.deliveryArrivalDownAt;
+    navUi.deliveryArrivalDownAt = null;
+    navUi.deliveryArrivalConsume = true;
+    if (held >= 1000) {
+      navShowNotice('此卡片仅短按A开门；按X收起后可长按A完成任务', 4000, '#ffcf70');
+    } else if (!navUi.actionPending && h?.state === 'ready_to_open' && h.can_open) {
+      const target = deliveryDoorPayload();
+      navShowNotice('正在请求打开配送舱门…', 2500, '#68e1ff');
+      void navigationAction('/api/delivery-handoff/open', target).then(ok => {
+        const current = deliveryHandoff();
+        if (ok && current?.task_id === target.task_id && current?.door_id === target.door_id) {
+          navUi.deliveryCardActive = false;
+          drawNavigationPanel();
+        }
+      });
+    } else if (!navUi.actionPending) {
+      navShowNotice(h?.state === 'opened' ? '舱门已打开，按X收起卡片' : '等待到达及舱位状态就绪', 3000, '#ffcf70');
+    }
+  }
+  return true;
+}
+
+// Delivery acceptance is a modal, not a menu item. Retain ownership until
+// release so the same held A cannot also complete the first task's action.
+function handleDeliveryOfferInput(a, x, y, b, now) {
+  const pending = deliveryOfferPending();
+  const key = pending ? deliveryHandoff().offer.order : '';
+  if (key !== navUi.deliveryInputKey) {
+    navUi.deliveryInputKey = key;
+    navUi.deliveryOfferArmed = false;
+    navUi.deliveryHoldAt = null;
+  }
+  if ((a && x) || y || b) {
+    navUi.deliveryOfferArmed = false;
+    navUi.deliveryHoldAt = null;
+    return false; // Keep reset chords available, but never accept on chord release.
+  }
+  if (navUi.deliveryConsumeUntilRelease) {
+    if (!a && !x) navUi.deliveryConsumeUntilRelease = false;
+    return true;
+  }
+  if (!pending) return false;
+  if (!a && !x) {
+    navUi.deliveryOfferArmed = true;
+    navUi.deliveryHoldAt = null;
+  }
+  if (!navUi.deliveryOfferArmed || navUi.actionPending) return true;
+  let decision = '';
+  if (x && !navUi.previous.x) decision = 'reject';
+  if (a) {
+    if (navUi.deliveryHoldAt == null) {
+      navUi.deliveryHoldAt = now;
+      navShowNotice('继续长按 A 1秒，开始洗衣房洗衣', 1400, '#68e1ff');
+    }
+    if (now - navUi.deliveryHoldAt >= 1000) decision = 'accept';
+  } else navUi.deliveryHoldAt = null;
+  if (decision) {
+    navUi.deliveryOfferArmed = false;
+    navUi.deliveryHoldAt = null;
+    navUi.deliveryConsumeUntilRelease = true;
+    navUi.menuVisible = false;
+    navShowNotice(decision === 'accept' ? '正在启动洗衣房洗衣…' : '已选择不接受', 2500, '#68e1ff');
+    void navigationAction(`/api/delivery-handoff/pickup-chain/${decision}`, {
+      order: key, client_id: globalThis.autolifeVrClientId?.() || ''
+    });
+  }
+  return true;
+}
 
 function navShowNotice(message, duration = 2800, color = '#68E1FF') {
   if (typeof showVrNotice === 'function') {
@@ -246,6 +389,12 @@ function setNavigationView(visible, notify = true) {
   drawNavigationPanel();
 }
 
+function navigationMapVisible() {
+  // The menu owns ordinary map visibility. Keep the map during localization
+  // and waypoint naming, where hiding it would remove the user's reference.
+  return Boolean(navUi.menuVisible || navUi.manualRelocalization || navUi.namingActive);
+}
+
 function toggleNavigationSession() {
   navUi.sessionActive = true;
   const modes = ['passthrough', 'rgbd'];
@@ -285,6 +434,7 @@ function driveWebsocketUrl() {
 }
 
 function ensureDriveWorker() {
+  if (globalThis.autolifeVrControlRequested?.() === false) return;
   if (navUi.driveWorker || !navUi.enabled || typeof Worker === 'undefined') return;
   const worker = new Worker('/drive_worker.js?v=navigation-21-drive-smooth');
   navUi.driveWorker = worker;
@@ -310,6 +460,7 @@ function ensureDriveWorker() {
 }
 
 function connectNavigationWebsocket() {
+  if (globalThis.autolifeVrControlRequested?.() === false) return;
   if (!navUi.enabled) return;
   window.setInterval(checkNavigationAssetVersion, 30000);
   if (navUi.websocket?.readyState === WebSocket.OPEN
@@ -320,7 +471,8 @@ function connectNavigationWebsocket() {
     if (navUi.websocket !== socket) return;
     navUi.statusLine = '底盘控制链路已连接';
     ensureDriveWorker();
-    void sendGripperForceRatio(false);
+    // Width comes from robot configuration; reconnecting must not replay
+    // browser-local force/width values from another headset.
     drawNavigationPanel();
     sendMonitorViewState(true);
   };
@@ -332,18 +484,6 @@ function connectNavigationWebsocket() {
         navUi.corridor = payload;
         navUi.corridorReceivedAt = performance.now();
         drawForwardCorridorGuide();
-      } else if (payload?.type === 'gripper_force_state') {
-        const ratio = Number(payload.ratio);
-        if (Number.isFinite(ratio)) {
-          navUi.gripperForceRatio = Math.max(
-            navUi.gripperForceMinimumRatio, Math.min(1.0, ratio)
-          );
-          window.localStorage.setItem(
-            'autolife-vr-gripper-force-ratio',
-            navUi.gripperForceRatio.toFixed(1)
-          );
-          drawNavigationPanel();
-        }
       }
     } catch (_error) {
       // A malformed optional overlay must never affect base control.
@@ -361,6 +501,8 @@ function connectNavigationWebsocket() {
   };
   socket.onerror = () => socket.close();
 }
+
+window.addEventListener('vr-control-requested', connectNavigationWebsocket);
 
 function sendBaseDrive(
   deadman,
@@ -393,66 +535,47 @@ function sendBaseDrive(
   socket.send(JSON.stringify({ type: 'base_drive', timestamp: Date.now(), ...payload }));
 }
 
-async function sendGripperForceRatio(showNotice = false) {
-  const requestedRatio = navUi.gripperForceRatio;
-  const requestId = ++navUi.gripperForceRequestId;
+async function sendGripperWidth(widthCm) {
+  if (navUi.gripperWidthBusy) return;
+  navUi.gripperWidthBusy = true;
   try {
-    const response = await fetch('/api/gripper/force', {
+    const response = await fetch('/api/gripper/width', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ratio: requestedRatio })
+      body: JSON.stringify({ width_cm: widthCm }),
+      signal: AbortSignal.timeout(5000)
     });
     const result = await response.json();
-    if (!response.ok || !result.success) {
-      throw new Error(result.message || `HTTP ${response.status}`);
-    }
-    if (requestId !== navUi.gripperForceRequestId) return true;
-    const appliedRatio = Number(result.ratio);
-    if (Number.isFinite(appliedRatio)) {
-      navUi.gripperForceRatio = Math.max(
-        navUi.gripperForceMinimumRatio, Math.min(1.0, appliedRatio)
-      );
-      window.localStorage.setItem(
-        'autolife-vr-gripper-force-ratio',
-        navUi.gripperForceRatio.toFixed(1)
-      );
-    }
-    if (showNotice) {
-      navShowNotice(
-        `夹爪力度已应用：${Math.round(navUi.gripperForceRatio * 100)}%`
-          + `（${(navUi.gripperForceRatio * navUi.gripperForceMaximumCurrent).toFixed(1)}`
-          + `/${navUi.gripperForceMaximumCurrent.toFixed(1)}）`,
-        1600,
-        '#72f0b1'
-      );
-    }
-    drawNavigationPanel();
-    return true;
+    if (!response.ok || !result.success) throw new Error(result.message || `HTTP ${response.status}`);
+    navUi.gripperWidthCm = Number(result.width_cm);
+    navShowNotice(`闭合宽度 ${navUi.gripperWidthCm.toFixed(1)}cm（名义值）`, 1600, '#72f0b1');
   } catch (error) {
-    if (requestId !== navUi.gripperForceRequestId) return false;
-    navShowNotice(
-      `夹爪力度设置失败：${error.message || error}`,
-      2200,
-      '#ff8b8b'
-    );
-    return false;
+    navShowNotice(`宽度未确认，请重试：${error.message || error}`, 2200, '#ff8b8b');
+  } finally {
+    navUi.gripperWidthBusy = false;
+    drawNavigationPanel();
   }
 }
 
-function adjustGripperForce(direction) {
-  const ratio = Math.max(
-    navUi.gripperForceMinimumRatio,
-    Math.min(
-      1.0,
-      navUi.gripperForceRatio + Math.sign(direction) * navUi.gripperForceStep
-    )
-  );
-  navUi.gripperForceRatio = Math.round(ratio * 10) / 10;
-  window.localStorage.setItem(
-    'autolife-vr-gripper-force-ratio',
-    navUi.gripperForceRatio.toFixed(1)
-  );
-  void sendGripperForceRatio(true);
+function adjustGripperWidth(direction) {
+  const next = Math.max(0, Math.min(9, navUi.gripperWidthCm + Math.sign(direction) * 0.5));
+  if (next !== navUi.gripperWidthCm) void sendGripperWidth(next);
+}
+
+function templateConfirmTaskCount() {
+  const templates = Array.isArray(navUi.state?.task_templates)
+    ? navUi.state.task_templates : [];
+  const template = templates.find(item => item.id === navUi.templateConfirmId);
+  return Array.isArray(template?.tasks) ? template.tasks.length : 0;
+}
+
+function adjustTemplateStartTask(direction) {
+  const count = templateConfirmTaskCount();
+  if (count < 2) return;
+  const nextIndex = Math.max(0, Math.min(count - 1,
+    navUi.templateStartIndex + Math.sign(direction)));
+  if (nextIndex === navUi.templateStartIndex) return;
+  navUi.templateStartIndex = nextIndex;
   drawNavigationPanel();
 }
 
@@ -476,9 +599,15 @@ function monitorViewState() {
   const cameraStatus = globalThis.autolifeVrCameraPreview?.getStatus?.() || {};
   const headFollowing = Boolean(globalThis.autolifeHeadFollowControl?.enabled?.());
   let menuTitle = '航点与操作';
-  if (navUi.templateConfirmId) menuTitle = '确认预设流程';
+  if (vrCustom.mode) menuTitle = vrCustom.title();
+  else if (navUi.templateConfirmId) menuTitle = '确认预设流程';
   else if (navUi.templateMode) menuTitle = '预设任务流程';
   else if (navUi.navigateConfirmName) menuTitle = '确认导航';
+  else if (navUi.deliveryReturnConfirm) menuTitle = '确认洗衣完成送回';
+  else if (navUi.washConfirm) menuTitle = '确认洗衣完成';
+  else if (navUi.dryConfirm) menuTitle = '确认前来取衣';
+  else if (navUi.deliveryOpenConfirm) menuTitle = '确认打开舱门';
+  else if (navUi.deliveryMode) menuTitle = '配送机器人交接';
   const manual = navUi.manualRelocalization;
   return {
     layout_version: 2,
@@ -534,7 +663,7 @@ function sendMonitorViewState(force = false) {
   navUi.monitorViewLastSentAt = now;
 }
 
-function setBaseControlLatched(enabled, notify = true) {
+function setBaseControlLatched(enabled, notify = true, resumeNavigation = false) {
   const next = Boolean(enabled);
   if (next === navUi.baseControlLatched) return;
   navUi.baseControlLatched = next;
@@ -546,6 +675,11 @@ function setBaseControlLatched(enabled, notify = true) {
     navUi.bodyHeightEngaged = false;
     sendBaseDrive(false);
     navUi.driveInputWasActive = false;
+    if (resumeNavigation) {
+      void navigationAction('/api/navigation/release-drive', {
+        client_id: globalThis.autolifeVrClientId?.()
+      });
+    }
   }
   if (notify) {
     navShowNotice(
@@ -558,13 +692,32 @@ function setBaseControlLatched(enabled, notify = true) {
 }
 
 function navigationItems() {
+  if (navUi.skipTaskConfirm) return [
+    {kind: 'cancel-task-skip', label: '← 取消，不跳过'},
+    {kind: 'confirm-task-skip', label: `确认跳过：${navUi.skipTaskConfirm.name}`}
+  ];
+  const custom = vrCustom.items();
+  if (custom) return custom;
+  if (navUi.exitConfirm) return [
+    {kind: 'cancel-exit-vr', label: '← 取消，继续使用'},
+    {kind: 'confirm-exit-vr', label: '确认停止任务并退出VR'}
+  ];
   const waypoints = Array.isArray(navUi.state?.waypoints) ? navUi.state.waypoints : [];
   const maps = Array.isArray(navUi.state?.maps) ? navUi.state.maps : [];
   const templates = Array.isArray(navUi.state?.task_templates)
     ? navUi.state.task_templates : [];
   if (navUi.templateConfirmId) {
+    const template = templates.find(item => item.id === navUi.templateConfirmId);
+    const taskList = Array.isArray(template?.tasks) ? template.tasks : [];
+    navUi.templateStartIndex = Math.max(0, Math.min(
+      navUi.templateStartIndex, taskList.length - 1));
+    const startTask = taskList[navUi.templateStartIndex];
+    const startLabel = startTask
+      ? `${navUi.templateStartIndex + 1}/${taskList.length} ${startTask.location}·${startTask.task}`
+      : '暂无任务，请返回重新选择';
     return [
       { kind: 'cancel-template', label: '← 取消预设流程' },
+      { kind: 'template-start-task', label: `起始任务：${startLabel}  ← →` },
       {
         kind: 'confirm-template',
         label: `确认启动：${navUi.templateConfirmName}`,
@@ -574,15 +727,31 @@ function navigationItems() {
     ];
   }
   if (navUi.templateMode) {
-    return [
+    if (navUi.deliveryReturnConfirm) {
+      return [
+        { kind: 'cancel-delivery-return', label: '← 取消，暂不呼车' },
+        { kind: 'confirm-delivery-return', label: '确认：洗衣完成，送回衣物' }
+      ];
+    }
+    const handoff = deliveryHandoff();
+    const items = [
       { kind: 'cancel-template', label: '← 返回航点菜单' },
-      ...templates.map(template => ({
-        kind: 'template-candidate',
-        label: `${template.name}（${template.task_count}项）`,
-        id: template.id,
-        name: template.name
-      }))
+      // Every TXT chain stays directly accessible. Calling the delivery
+      // robot is a separate, explicitly labelled action below.
+      ...templates
+        .map(template => ({
+          kind: 'template-candidate',
+          label: `${template.name}（${template.task_count}项）`,
+          id: template.id,
+          name: template.name
+        }))
     ];
+    // Delivery-robot handoff lives inside the template list: quiet until the
+    // robot physically arrives, then the arrival card takes over.
+    if (handoff && handoff.state && handoff.state !== 'disabled') {
+      items.push({ kind: 'delivery-menu', label: '云迹机器人控制' });
+    }
+    return items;
   }
   if (navUi.mapConfirmPath) {
     return [
@@ -635,16 +804,66 @@ function navigationItems() {
       }))
     ];
   }
+  if (navUi.deliveryMode) {
+    const handoff = deliveryHandoff();
+    const state = String(handoff?.state || 'unknown');
+    if (navUi.deliveryCloseConfirm) {
+      return [
+        {kind: 'cancel-delivery-close', label: '← 取消，暂不关门'},
+        {kind: 'confirm-delivery-close', label: `确认关门：${navUi.deliveryCloseConfirm.room || '本单'} · 舱门${navUi.deliveryCloseConfirm.door_id}`}
+      ];
+    }
+    if (navUi.washConfirm) {
+      return [
+        { kind: 'cancel-wash', label: '← 取消，暂不标记' },
+        { kind: 'confirm-wash', label: '确认：本单洗衣已完成' }
+      ];
+    }
+    if (navUi.dryConfirm) {
+      return [
+        { kind: 'cancel-dry', label: '← 取消，暂不呼车' },
+        { kind: 'confirm-dry', label: '确认：呼叫配送机器人前来取衣' }
+      ];
+    }
+    const items = [{ kind: 'cancel-delivery', label: '← 返回航点菜单' }];
+    items.push({
+      kind: 'delivery-status',
+      label: `云迹状态：${handoff?.label || '状态未知'}`
+    });
+    items.push(handoff?.can_close
+      ? {kind: 'delivery-close', label: `关闭舱门（舱门${handoff.door_id}）…`}
+      : {kind: 'delivery-status', label: state === 'closed' ? '关门已受理'
+        : state === 'closing' ? '正在请求关门…' : '关闭舱门 · 等待已开舱状态'});
+    items.push({ kind: 'wash-complete', label: '洗衣完成 · 标记本单已洗完…' });
+    items.push(
+      handoff?.dry_complete_sent_at
+        ? { kind: 'delivery-status', label: '已呼叫配送 · 等待到达' }
+        : { kind: 'dry-complete', label: '前来取衣 · 呼叫配送机器人…' }
+    );
+    if (state === 'ready_to_open') {
+      items.push(navUi.deliveryOpenConfirm
+        ? { kind: 'confirm-delivery-open', label: `确认打开舱门：舱门${handoff.door_id}` }
+        : { kind: 'delivery-open', label: `打开舱门（舱门${handoff.door_id}）…` });
+    }
+    return items;
+  }
   return [
     { kind: 'stop', label: '■ 停止当前导航' },
+    ...(navUi.state?.task_dispatch?.state === 'failed'
+      ? [{kind: 'task-retry-pose', label: '重试当前姿态（锁头后长按A）'}] : []),
+    ...(['navigating','navigation_failed','adjusting_height','awaiting_action','failed'].includes(navUi.state?.task_dispatch?.state)
+      ? [{kind: 'task-skip', label: '跳过当前任务…（需确认）'}] : []),
     { kind: 'relocalize', label: '◎ 重新全局定位' },
     { kind: 'manual-relocalize', label: '⌖ 手动重定位' },
     { kind: 'map-library', label: '▣ 切换地图与航点库' },
     { kind: 'task-templates', label: '▶ 预设多任务流程…' },
+    { kind: 'custom-open', label: '＋ 自定义任务流程…' },
+    { kind: 'pose-open', label: '头部角度 / 身体高度…' },
     {
       kind: 'gripper-force',
-      label: `夹爪力度 ${Math.round(navUi.gripperForceRatio * 100)}%  ← →`
+      label: `闭合宽度 ${navUi.gripperWidthCm.toFixed(1)}cm${navUi.gripperWidthBusy ? ' …' : '  ← →'}`
     },
+    { kind: 'exit-vr', label: '退出VR遥操…' },
     { kind: 'save-waypoint', label: '＋ 保存当前位置为航点' },
     { kind: 'delete-waypoint', label: '－ 删除航点…' },
     ...waypoints.map(name => ({ kind: 'waypoint', label: name, name }))
@@ -1637,8 +1856,46 @@ function drawNavigationPanel() {
   context.font = 'bold 17px sans-serif';
   context.fillText(headFollowing ? 'B · 头部跟随' : 'B · 头部已锁定', 820, 44);
 
+  const delivery = deliveryHandoff();
+  if (navUi.deliveryUiVisible && delivery && delivery.state
+      && delivery.state !== 'disabled') {
+    const laundrySent = Boolean(delivery.dry_complete_sent_at);
+    const waitingReturn = laundrySent
+      && !['RETURN_TO_ROOM', 'RETURN_AT_ROOM', 'COMPLETED'].includes(
+        String(delivery.status_code || '')
+      )
+      && ['no_task', 'delivering', 'arrived_wait_door', 'ready_to_open',
+        'opening', 'opened', 'unknown'].includes(String(delivery.state));
+    const statusLabel = String(delivery.status_label || '');
+    const returnLabel = laundrySent ? {
+      RETURN_STARTED: '回程 · 前来洗衣房',
+      RETURN_AT_LAUNDRY: '回程 · 已到达',
+    }[String(delivery.status_code || '')] || '' : '';
+    const deliveryColours = {
+      no_task: waitingReturn ? '#68e1ff' : '#a9bbc5',
+      delivering: statusLabel ? '#68e1ff' : '#a9bbc5',
+      arrived_wait_door: '#ffcf70',
+      unknown: '#ffcf70',
+      ready_to_open: '#72f0b1',
+      opening: '#68e1ff',
+      opened: '#72f0b1'
+    };
+    roundRect(context, 216, 18, 340, 40, 10, 'rgba(3, 14, 21, 0.82)');
+    context.fillStyle = statusLabel === '已到达洗衣房' || returnLabel === '回程 · 已到达'
+      ? '#72f0b1'
+      : (deliveryColours[delivery.state] || '#a9bbc5');
+    context.font = 'bold 17px sans-serif';
+    const chipLabel = statusLabel
+      || returnLabel
+      || (laundrySent
+        ? '已通知 · 等待配送机器人'
+        : '任务执行中');
+    context.fillText(`配送机器人：${chipLabel}`.slice(0, 19), 234, 44);
+  }
+
   navUi.items = navigationItems();
   navUi.selected = Math.max(0, Math.min(navUi.selected, navUi.items.length - 1));
+  if (navigationMapVisible()) {
   const mapArea = mapDisplayArea();
   const mapUiScale = Number(mapArea.uiScale || 1.0);
   drawMap(context, mapArea);
@@ -1677,6 +1934,7 @@ function drawNavigationPanel() {
     mapArea.x + 20 * mapUiScale,
     mapArea.y + mapArea.h - 19 * mapUiScale
   );
+  }
 
   if (navUi.manualRelocalization) {
     roundRect(context, 846, 88, 330, 248, 17, 'rgba(4, 18, 27, 0.90)');
@@ -1702,16 +1960,28 @@ function drawNavigationPanel() {
     context.fillText('X：取消', 866, 294);
   } else if (navUi.namingActive) {
     drawWaypointNameEditor(context);
+  } else if (navUi.menuVisible && vrCustom.mode) {
+    vrCustom.draw(context);
   } else if (navUi.menuVisible) {
     roundRect(context, 846, 88, 330, 446, 17, 'rgba(4, 18, 27, 0.88)');
     context.fillStyle = '#eafaff';
     context.font = 'bold 23px sans-serif';
     context.fillText(
-      navUi.templateConfirmId
+      vrCustom.mode ? vrCustom.title() : navUi.templateConfirmId
         ? '确认预设流程'
         : (navUi.templateMode
           ? '预设任务流程'
-          : (navUi.navigateConfirmName ? '确认导航' : '航点与操作')),
+          : (navUi.deliveryReturnConfirm
+            ? '确认洗衣完成送回'
+            : (navUi.washConfirm
+              ? '确认洗衣完成'
+              : (navUi.dryConfirm
+                ? '确认前来取衣'
+                : (navUi.deliveryOpenConfirm
+                  ? '确认打开舱门'
+                  : (navUi.deliveryMode
+                    ? '云迹机器人控制'
+                    : (navUi.navigateConfirmName ? '确认导航' : '航点与操作'))))))),
       866,
       126
     );
@@ -1729,19 +1999,26 @@ function drawNavigationPanel() {
       }
       context.fillStyle = index === navUi.selected ? '#ffffff' : '#bdd0d8';
       context.font = index === navUi.selected ? 'bold 19px sans-serif' : '18px sans-serif';
-      const label = item.label.length > 15 ? `${item.label.slice(0, 14)}…` : item.label;
-      context.fillText(`${index === navUi.selected ? '› ' : '  '}${label}`, 872, y + 28);
+      const label = vrCustom.mode ? item.label : (item.label.length > 15 ? `${item.label.slice(0, 14)}…` : item.label);
+      if (vrCustom.mode) {
+        let size = 18;
+        while (context.measureText(label).width > 269 && size > 13) {
+          context.font = `${--size}px sans-serif`;
+        }
+      }
+      context.fillText(`${index === navUi.selected ? '› ' : '  '}${label}`, 872, y + 28, 282);
     });
     context.fillStyle = '#68e1ff';
     context.font = '16px sans-serif';
-    context.fillText('右摇杆上下选择 · 力度项左右调节', 864, 423);
-    context.fillText('按右摇杆键关闭菜单', 864, 452);
-    context.fillText('X 全局重定位', 864, 481);
+    context.fillText(vrCustom.mode ? '右摇杆上下选择 · A 确认' : '右摇杆上下选择 · 宽度项左右调节', 864, 423);
+    context.fillText('按右摇杆键收起菜单和地图', 864, 452);
+    context.fillText(vrCustom.mode === 'pose' ? '俯视上限按关节安全限位执行'
+      : vrCustom.mode ? '最多32项 · 可重复添加' : 'X 全局重定位', 864, 481);
   } else {
     roundRect(context, 891, 91, 284, 43, 11, 'rgba(4, 18, 27, 0.78)');
     context.fillStyle = '#d9f8ff';
     context.font = '18px sans-serif';
-    context.fillText('按右摇杆键打开航点菜单', 910, 119);
+    context.fillText('右摇杆键：菜单和地图', 910, 119);
   }
 
   const dispatch = navUi.state?.task_dispatch;
@@ -1760,7 +2037,7 @@ function drawNavigationPanel() {
     context.fillStyle = pending ? '#ffd276' : (failed ? '#ff91a7' : '#72f0b1');
     context.font = 'bold 22px sans-serif';
     const title = pending ? '任务分发确认' : (
-      completed ? '任务串已完成' : `任务 ${Math.max(1, dispatch.current_index + 1)} / ${dispatch.total}`
+      completed ? '任务串已完成' : `任务 ${Math.max(1, dispatch.current_index + 1)} / ${dispatch.total}${current?.operator_arrived ? ' · 人工到达' : ''}`
     );
     context.fillText(title, 442, 106);
     context.fillStyle = '#eefbff';
@@ -1769,17 +2046,22 @@ function drawNavigationPanel() {
       context.fillText(`${current.location} · ${current.task}`.slice(0, 23), 442, 140);
       context.fillStyle = '#b8d7e1';
       context.font = '16px sans-serif';
-      context.fillText(`身体高度：${current.body_height_level}档`, 442, 168);
+      context.fillText(`身体↓${current.body_lowering_cm ?? 0}cm · 头部↓${current.head_pitch_deg ?? 30}°${current.automatic ? ' · 自动待部署' : ''}`, 442, 168);
     }
     context.fillStyle = pending ? '#ffd276' : '#9edbea';
     context.font = 'bold 16px sans-serif';
     const instruction = pending
       ? `收到 ${dispatch.total} 项任务 · A接受 · 长按X退出`
       : (awaiting ? '长按A完成动作 · 长按X退出任务'
-        : (navigationFailed ? '未到达 · 长按A重试 · 长按B跳过 · 长按X退出'
+        : (navigationFailed ? '长按A重试 · B人工到达 · X退出'
         : (completed ? '任务流程已完成'
-          : (adjusting ? '正在确认执行条件 · 长按X退出'
-            : '长按X退出当前任务'))));
+          : (adjusting ? (navUi.state?.task_pose_waiting_for_head_lock
+            ? '头部手动控制中 · B锁头后继续' : '正在调整高度和头部 · 长按X退出')
+            : (failed ? (navUi.baseControlLatched ? '先按左摇杆键退出底盘接管'
+              : (navUi.menuVisible ? '菜单选“重试当前姿态” · 长按A'
+                : '锁头后长按A重试 · 长按X退出'))
+            : (navUi.state?.task_pose_waiting_for_head_lock
+              ? '导航继续 · B锁头后恢复姿态' : '长按B人工到达 · 长按X退出'))))));
     context.fillText(String(instruction || '').slice(0, 28), 442, 197);
   }
 
@@ -1793,6 +2075,82 @@ function drawNavigationPanel() {
     context.fillText('⚠ 自动重定位失败 · 请打开菜单选择“手动重定位”', 417, 259);
   }
 
+  // Outbound offer card: the operator's accept/reject decision surface.
+  // Card stacking order: task dispatch, offer, arrival.
+  const taskCardShowing = Boolean(
+    dispatch && !['idle', 'cancelled', 'completed'].includes(dispatch.state)
+  );
+  const offerData = deliveryHandoff()?.offer;
+  const offerShowing = deliveryOfferPending();
+  if (offerShowing && offerData) {
+    const offerY = taskCardShowing ? 290 : 72;
+    roundRect(context, 420, offerY, 406, 148, 16, 'rgba(8, 40, 58, 0.96)');
+    context.fillStyle = '#7de3ff';
+    context.font = 'bold 24px sans-serif';
+    context.fillText('配送机器人开始工作', 442, offerY + 38);
+    context.fillStyle = '#eefbff';
+    context.font = 'bold 20px sans-serif';
+    const offerRoom = offerData.room_no ? ` · 房间 ${offerData.room_no}` : '';
+    context.fillText(`前往客房接衣${offerRoom}`.slice(0, 22), 442, offerY + 72);
+    context.fillStyle = '#9edbea';
+    context.font = 'bold 18px sans-serif';
+    const offerInstruction = '长按 A 1秒开始洗衣 · X 不接受';
+    context.fillText(String(offerInstruction).slice(0, 26), 442, offerY + 108);
+    context.fillStyle = '#7fa9b8';
+    context.font = '15px sans-serif';
+    context.fillText(`任务：${offerData.chain} · 订单${String(offerData.order).slice(-8)}`, 442, offerY + 134);
+  }
+
+  // Arrival card: the operator's action surface for opening the delivery
+  // robot's cabin, independent of task acceptance.
+  const deliveryCard = navUi.deliveryCardActive ? deliveryHandoff() : null;
+  if (deliveryCard && deliveryCard.state && deliveryCard.state !== 'disabled') {
+    const cardState = String(deliveryCard.state);
+    let cardY = 72;
+    if (taskCardShowing) cardY += 218;
+    if (offerShowing) cardY += 218;
+    const opened = cardState === 'opened';
+    const closed = cardState === 'closed';
+    const closing = cardState === 'closing';
+    const opening = cardState === 'opening';
+    const waitDoor = cardState === 'arrived_wait_door';
+    const unknown = cardState === 'unknown';
+    const background = opened
+      ? 'rgba(12, 66, 42, 0.95)'
+      : (unknown ? 'rgba(92, 22, 30, 0.94)' : 'rgba(6, 34, 48, 0.96)');
+    roundRect(context, 420, cardY, 406, 148, 16, background);
+    context.fillStyle = opened ? '#8df3bd' : (unknown ? '#ff91a7' : '#7de3ff');
+    context.font = 'bold 24px sans-serif';
+    context.fillText(closed ? '关门已受理' : opened ? '舱门已打开' : '配送机器人已到达', 442, cardY + 38);
+    context.fillStyle = '#eefbff';
+    context.font = 'bold 20px sans-serif';
+    const roomText = deliveryCard.room_no ? ` · 房间 ${deliveryCard.room_no}` : '';
+    const doorText = waitDoor
+      ? '舱位等待就绪…'
+      : `舱门 ${deliveryCard.door_id ?? '—'}${roomText}`;
+    context.fillText(doorText.slice(0, 22), 442, cardY + 72);
+    context.fillStyle = waitDoor ? '#ffd276' : '#9edbea';
+    context.font = 'bold 18px sans-serif';
+    const instruction = closed ? '配送机器人可能继续行程 · X 收起'
+      : closing ? '正在请求关门，请保持避让…' : opening
+      ? '开门请求进行中，请稍候…'
+      : (opened
+        ? '请尽快完成取衣（约90秒后自动关门）· X 收起'
+        : (waitDoor
+          ? '舱位就绪后此处自动更新 · X 收起'
+          : (unknown
+            ? `状态获取失败 · X 收起${deliveryCard.detail ? '' : ''}`
+            : '短按 A 开舱门 · X 收起')));
+    context.fillText(String(instruction).slice(0, 26), 442, cardY + 108);
+    context.fillStyle = '#7fa9b8';
+    context.font = '15px sans-serif';
+    context.fillText(
+      '收起此卡后，长按A才会完成当前任务',
+      442,
+      cardY + 134
+    );
+  }
+
   context.fillStyle = '#a9bbc5';
   context.font = '18px sans-serif';
   const navText = navUi.baseControlLatched
@@ -1803,6 +2161,13 @@ function drawNavigationPanel() {
   // not become an unexplained empty blue bar in the lower-right corner.
   context.fillStyle = navUi.baseControlLatched ? '#72f0b1' : '#a9bbc5';
   context.fillText(navText.slice(0, 27), 606, 856);
+  if (navUi.baseControlLatched) {
+    const pose = navUi.state?.body_pose;
+    roundRect(context, 586, 778, 590, 40, 10, 'rgba(4,18,27,0.85)');
+    context.fillStyle='#72f0b1';context.font='20px sans-serif';
+    context.fillText(pose?.lowering_cm == null ? '身体高度：反馈暂不可用'
+      : `身体下降 ${pose.lowering_cm.toFixed(1)} cm  ·  X 降低 / Y 升高`,606,805);
+  }
   const actualFps = navigationCameraFps();
   context.save();
   context.textAlign = 'right';
@@ -1823,7 +2188,20 @@ async function refreshNavigationState() {
     const response = await fetch('/api/navigation/state', { cache: 'no-store' });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     navUi.state = await response.json();
+    if (navUi.state.task_catalog_error && navUi.catalogError !== navUi.state.task_catalog_error) {
+      navShowNotice('任务库：' + navUi.state.task_catalog_error, 6000, '#ff8b8b');
+    }
+    navUi.catalogError = navUi.state.task_catalog_error || '';
     navUi.showroomModeEnabled = navUi.state?.showroom_mode_enabled === true;
+    const voiceToggle = document.getElementById('voiceEnabledToggle');
+    if (voiceToggle && !voiceToggle.dataset.pending) voiceToggle.checked = navUi.state?.voice_enabled === true;
+    const voiceHealth = document.getElementById('voiceHealthLabel');
+    if (voiceHealth) {
+      const health = navUi.state?.speech_health || {};
+      voiceHealth.textContent = !navUi.state?.voice_enabled ? '已关闭：展厅模式不会自动开启语音'
+        : health.state === 'failed' ? `播报不可用：${health.last_error || '请检查语音服务'}`
+        : health.engine_ready ? '语音引擎已就绪' : '正在准备语音引擎…';
+    }
     const showroomToggle = document.getElementById('showroomModeToggle');
     if (showroomToggle && !showroomToggle.dataset.pending) {
       showroomToggle.checked = navUi.showroomModeEnabled;
@@ -1866,11 +2244,102 @@ async function refreshNavigationState() {
           5000,
           '#72f0b1'
         );
+      } else if (task?.state === 'failed') {
+        navShowNotice(
+          `${task.message || '任务姿态调整失败'}\n头部锁定、松开腰键并退出底盘接管后\n菜单选“重试当前姿态”或收起菜单\n长按 A 1秒并松开重试`,
+          10000,
+          '#ff91a7'
+        );
       } else if (task?.state === 'navigation_failed') {
         navShowNotice(
-          `未能到达：${task.current?.location || '当前点位'}\n长按 A 1秒重试当前点位 · 长按 B 1秒跳过`,
+          `未能到达：${task.current?.location || '当前点位'}\n长按 A 1秒重试当前点位 · 长按 B 1秒人工到达`,
           8000,
           '#ff91a7'
+        );
+      }
+    }
+    // Delivery-robot handoff: the status chip follows the delivery task
+    // chains (洗衣/取衣) — it shows only while one of them executes, however
+    // it was started.  Raw robot status alone never raises UI; the outbound
+    // offer card and the arrival card are separate decision surfaces.
+    const delivery = deliveryHandoff();
+    const deliveryState = String(delivery?.state || '');
+    const statusCode = String(delivery?.status_code || '');
+    const statusLabel = String(delivery?.status_label || '');
+    if (deliveryState !== 'ready_to_open') {
+      navUi.deliveryOpenConfirm = false;
+    }
+    const laundrySent = Boolean(delivery?.dry_complete_sent_at);
+    const dispatchNow = navUi.state?.task_dispatch;
+    const chainNames = [
+      String(delivery?.pickup_task_chain || ''),
+      String(delivery?.return_task_chain || ''),
+    ].filter(Boolean);
+    const dispatchActive = Boolean(
+      dispatchNow
+        && !['idle', 'cancelled', 'completed'].includes(dispatchNow.state)
+    );
+    const chainActive = dispatchActive && chainNames.some(
+      name => String(dispatchNow.source_text || '').includes(name)
+    );
+    navUi.deliveryUiVisible = chainActive;
+    const deliveryTaskOver = deliveryState === 'disabled'
+      || deliveryState === 'no_task'
+      || (!delivery?.task_id && deliveryState !== 'unknown');
+    if (deliveryTaskOver && !laundrySent) {
+      navUi.deliveryNoticeKey = '';
+    }
+    if (deliveryTaskOver) navUi.deliveryCardActive = false;
+    // Outbound task offer: notify once per order while the headset is on.
+    const offer = delivery?.offer;
+    if (deliveryOfferPending()) {
+      if (navUi.sessionActive && offer.order !== navUi.deliveryOfferKey) {
+        navUi.deliveryOfferKey = offer.order;
+        navUi.deliveryOfferArmed = false;
+        setNavigationView(true, false);
+        navUi.menuVisible = false;
+        navShowNotice(
+          '配送机器人开始工作\n长按 A 1秒开始洗衣房洗衣 · X 不接受',
+          6000,
+          '#68e1ff'
+        );
+      }
+    } else {
+      navUi.deliveryOfferArmed = false;
+    }
+    const deliveryKey = delivery?.task_id
+      ? `${delivery.task_id}:${delivery.door_id ?? ''}` : '';
+    const deliveryArrivedish = ['PICKUP_AT_LAUNDRY', 'RETURN_AT_LAUNDRY']
+      .includes(statusCode) || [
+      'arrived_wait_door', 'ready_to_open', 'opening', 'opened'
+    ].includes(deliveryState);
+    if (navUi.sessionActive && !deliveryTaskOver && deliveryKey && deliveryArrivedish
+        && deliveryKey !== navUi.deliveryNoticeKey) {
+      navUi.deliveryNoticeKey = deliveryKey;
+      if (navUi.sessionActive) {
+        // The big arrival card is an in-headset action surface, independent
+        // of task acceptance: it appears even for a rejected offer so the
+        // cabin can still be opened with a short A press.
+        navUi.deliveryCardActive = true;
+        navUi.deliveryCardArmed = false;
+        setNavigationView(true, false);
+        navUi.menuVisible = false;
+        navShowNotice(
+          '配送机器人已到达洗衣房\n短按 A 开舱门 · X 收起\n此卡片不会完成当前任务',
+          6000,
+          '#72f0b1'
+        );
+      }
+    }
+    const chainNote = delivery?.chain_trigger;
+    const chainNoteKey = chainNote ? JSON.stringify(chainNote) : '';
+    if (chainNoteKey && chainNoteKey !== navUi.deliveryChainNoteKey) {
+      navUi.deliveryChainNoteKey = chainNoteKey;
+      if (chainNote.event === 'failed') {
+        navShowNotice(
+          `配送任务串启动失败：${chainNote.message || chainNote.chain}`,
+          7000,
+          '#ff8c8c'
         );
       }
     }
@@ -1903,7 +2372,8 @@ async function navigationAction(path, payload = {}) {
   }
   navUi.actionPending = true;
   const abortController = new AbortController();
-  const timeoutMilliseconds = path.includes('/map/switch') ? 15000 : 6500;
+  const timeoutMilliseconds = (path.includes('/map/switch') || path.includes('operator-arrival')
+    || path.includes('skip-current') || path.includes('release-drive')) ? 15000 : 6500;
   const requestTimeout = window.setTimeout(() => abortController.abort(), timeoutMilliseconds);
   let succeeded = false;
   try {
@@ -1915,6 +2385,11 @@ async function navigationAction(path, payload = {}) {
     });
     let result = {};
     try { result = await response.json(); } catch (_) { /* text-only failure */ }
+    if (path.includes('/delivery-handoff/')) {
+      if (result.delivery_handoff) navUi.state.delivery_handoff = result.delivery_handoff;
+      if (result.task_dispatch) navUi.state.task_dispatch = result.task_dispatch;
+      drawNavigationPanel();
+    }
     if (!response.ok || result.success === false) {
       throw new Error(result.message || `HTTP ${response.status}`);
     }
@@ -2058,7 +2533,51 @@ function moveWaypointNameSelection(horizontal, vertical) {
 function activateNavigationItem() {
   const item = navUi.items[navUi.selected];
   if (!item) return;
-  if (item.kind === 'stop') {
+  if (item.kind.startsWith('custom-') || item.kind.startsWith('pose-')) {
+    void vrCustom.activate(item);return;
+  }
+  if (item.kind === 'task-skip') {
+    navUi.taskHoldCancelled = true;
+    navUi.taskCompleteLatched = false;
+    const task = navUi.state?.task_dispatch;
+    navUi.skipTaskConfirm = {token: task?.task_token, name: task?.current?.location || '当前任务'};
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-task-skip') {
+    navUi.skipTaskConfirm = null;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-task-skip') {
+    const pending = navUi.skipTaskConfirm;
+    navUi.skipTaskConfirm = null;
+    navUi.selected = 0;
+    setBaseControlLatched(false, false);
+    void navigationAction('/api/tasks/skip-current', {
+      confirmed: true, task_token: pending?.token, client_id: globalThis.autolifeVrClientId?.()
+    });
+    drawNavigationPanel();
+  } else if (item.kind === 'exit-vr') {
+    setBaseControlLatched(false, false);
+    sendBaseDrive(false);
+    navUi.exitConfirm = true;
+    navUi.selected = 0;
+    navShowNotice('退出将停止任务并释放接管\n右摇杆选择，A确认', 6000, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-exit-vr') {
+    navUi.exitConfirm = false;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-exit-vr') {
+    if (navUi.exitPending) return;
+    navUi.exitPending = true;
+    navShowNotice('正在停止导航并安全退出…', 12000, '#ffcf70');
+    void globalThis.autolifeExitVrSession().catch(error => {
+      navUi.exitPending = false;
+      navShowNotice(`退出未完成：${error.message}，请重试`, 7000, '#ffcf70');
+    });
+  } else if (item.kind === 'task-retry-pose') {
+    navShowNotice('先锁定头部，再长按 A 1秒并松开重试当前姿态', 3000, '#ffcf70');
+  } else if (item.kind === 'stop') {
     void navigationAction('/api/navigation/stop');
   } else if (item.kind === 'relocalize') {
     void navigationAction('/api/navigation/relocalize');
@@ -2087,34 +2606,42 @@ function activateNavigationItem() {
     navUi.templateMode = true;
     navUi.templateConfirmId = null;
     navUi.templateConfirmName = null;
+    navUi.templateStartIndex = 0;
     navUi.selected = 0;
     drawNavigationPanel();
   } else if (item.kind === 'template-candidate') {
     navUi.templateConfirmId = item.id;
     navUi.templateConfirmName = item.name;
+    navUi.templateStartIndex = 0;
     navUi.selected = 1;
-    navShowNotice(`再次按 A 启动任务流程：${item.name}`, 3200, '#ffcf70');
+    navShowNotice('右摇杆左右选择起始任务，再选“确认启动”按 A', 3200, '#ffcf70');
     drawNavigationPanel();
   } else if (item.kind === 'cancel-template') {
     if (navUi.templateConfirmId) {
       navUi.templateConfirmId = null;
       navUi.templateConfirmName = null;
+      navUi.templateStartIndex = 0;
     } else {
       navUi.templateMode = false;
+      navUi.deliveryReturnConfirm = false;
     }
     navUi.selected = 0;
     drawNavigationPanel();
   } else if (item.kind === 'confirm-template') {
     const identifier = item.id;
     const name = item.name;
+    const startIndex = navUi.templateStartIndex;
     navUi.templateMode = false;
     navUi.templateConfirmId = null;
     navUi.templateConfirmName = null;
+    navUi.templateStartIndex = 0;
     navUi.selected = 0;
     navShowNotice(`正在启动预设流程：${name}`, 2400, '#68e1ff');
-    void navigationAction('/api/tasks/template/start', { id: identifier });
+    void navigationAction('/api/tasks/template/start', { id: identifier, start_index: startIndex });
+  } else if (item.kind === 'template-start-task') {
+    navShowNotice('右摇杆左右选择起始任务；之前步骤不执行', 2200, '#68e1ff');
   } else if (item.kind === 'gripper-force') {
-    navShowNotice('右摇杆左右调节夹爪力度', 1800, '#68e1ff');
+    navShowNotice('右摇杆左右调节闭合宽度；松开扳机全开', 1800, '#68e1ff');
   } else if (item.kind === 'map-candidate') {
     if (item.active) {
       navShowNotice(`当前已加载地图：${item.name}`, 2200, '#72f0b1');
@@ -2177,6 +2704,133 @@ function activateNavigationItem() {
       navShowNotice(`正在前往：${name}`);
       void navigationAction('/api/navigation/waypoint', { name });
     }
+  } else if (item.kind === 'wash-complete') {
+    navUi.washConfirm = true;
+    navUi.dryConfirm = false;
+    navUi.deliveryOpenConfirm = false;
+    // Put the explicit confirmation under the cursor; cancel stays above.
+    navUi.selected = 1;
+    navShowNotice('仅标记洗衣完成（不呼叫配送机器人）', 3200, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-wash') {
+    navUi.washConfirm = false;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-wash') {
+    navUi.washConfirm = false;
+    navUi.selected = 0;
+    navShowNotice('正在标记洗衣完成…', 2000, '#68e1ff');
+    void navigationAction('/api/delivery-handoff/wash-complete');
+  } else if (item.kind === 'dry-complete') {
+    navUi.dryConfirm = true;
+    navUi.washConfirm = false;
+    navUi.deliveryOpenConfirm = false;
+    navUi.selected = 1;
+    navShowNotice('确认后呼叫配送机器人前来取衣', 3200, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-dry') {
+    navUi.dryConfirm = false;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-dry') {
+    navUi.dryConfirm = false;
+    navUi.selected = 0;
+    navShowNotice('正在呼叫配送机器人…', 2000, '#68e1ff');
+    void navigationAction('/api/delivery-handoff/dry-complete').then(ok => {
+      if (ok) {
+        // Keep the status chip up so the wait for the return trip is visible.
+        navUi.deliveryUiVisible = true;
+        drawNavigationPanel();
+      }
+    });
+  } else if (item.kind === 'delivery-return') {
+    navUi.deliveryReturnConfirm = true;
+    navUi.selected = 0;
+    navShowNotice('确认后将通知配送机器人前来，并开始送回任务串', 3200, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-delivery-return') {
+    navUi.deliveryReturnConfirm = false;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-delivery-return') {
+    navUi.deliveryReturnConfirm = false;
+    navUi.selected = 0;
+    navShowNotice('正在通知配送机器人并准备任务…', 2000, '#68e1ff');
+    void navigationAction('/api/delivery-handoff/return-chain/start');
+  } else if (item.kind === 'delivery-menu') {
+    navUi.deliveryMode = true;
+    navUi.deliveryCloseConfirm = null;
+    navUi.deliveryOpenConfirm = false;
+    navUi.templateMode = false;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-delivery') {
+    if (navUi.deliveryOpenConfirm) {
+      navUi.deliveryOpenConfirm = false;
+    } else if (navUi.washConfirm) {
+      navUi.washConfirm = false;
+    } else if (navUi.dryConfirm) {
+      navUi.dryConfirm = false;
+    } else {
+      // One level up: the handoff submenu is reached from the template list.
+      navUi.deliveryMode = false;
+      navUi.templateMode = true;
+    }
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'delivery-close') {
+    const handoff = deliveryHandoff();
+    if (!handoff?.can_close) {
+      navShowNotice('尚未获得可关门的舱位，请等待状态更新', 3000, '#ffcf70');
+      return;
+    }
+    navUi.deliveryCloseConfirm = {...deliveryDoorPayload(), room: handoff.room_no};
+    navUi.selected = 1;
+    navShowNotice('请移开手臂和衣物，确认舱门无阻挡\n再次按A关门，配送机器人可能继续行程', 6500, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'cancel-delivery-close') {
+    navUi.deliveryCloseConfirm = null;
+    navUi.selected = 0;
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-delivery-close') {
+    const target = navUi.deliveryCloseConfirm;
+    if (!target || navUi.actionPending) return;
+    navUi.deliveryCloseConfirm = null;
+    navUi.selected = 0;
+    void navigationAction('/api/delivery-handoff/close', {...target, confirmed: true});
+    drawNavigationPanel();
+  } else if (item.kind === 'delivery-open') {
+    const handoff = deliveryHandoff();
+    if (!handoff?.can_open || handoff.state !== 'ready_to_open') {
+      navShowNotice('当前状态不允许开舱，请等待到达且舱位就绪', 2600, '#ffcf70');
+      return;
+    }
+    navUi.deliveryOpenConfirm = true;
+    // Put the explicit confirmation under the cursor so a deliberate second
+    // A press sends the open command; cancel stays one row above.
+    navUi.selected = 1;
+    navShowNotice(`再次按 A 确认打开舱门：舱门${handoff.door_id}`, 3200, '#ffcf70');
+    drawNavigationPanel();
+  } else if (item.kind === 'confirm-delivery-open') {
+    const handoff = deliveryHandoff();
+    if (!handoff?.can_open || handoff.state !== 'ready_to_open') {
+      navUi.deliveryOpenConfirm = false;
+      navShowNotice('状态已变化，请稍候重试', 2600, '#ffcf70');
+      drawNavigationPanel();
+      return;
+    }
+    navUi.deliveryOpenConfirm = false;
+    navUi.selected = 0;
+    navShowNotice('正在请求打开舱门…', 2000, '#68e1ff');
+    void navigationAction('/api/delivery-handoff/open', deliveryDoorPayload());
+  } else if (item.kind === 'delivery-status') {
+    const handoff = deliveryHandoff();
+    const detail = String(handoff?.detail || '').trim();
+    navShowNotice(
+      `配送机器人：${handoff?.label || '状态未知'}${detail ? `\n${detail}` : ''}`,
+      3200,
+      '#68e1ff'
+    );
   } else if (item.kind === 'confirm-delete') {
     const name = item.name;
     navUi.deleteMode = false;
@@ -2227,6 +2881,22 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       navUi.mapMode = false;
       navUi.mapConfirmPath = null;
       navUi.mapConfirmName = null;
+      navUi.deliveryMode = false;
+      navUi.deliveryOpenConfirm = false;
+      navUi.deliveryCloseConfirm = null;
+      navUi.washConfirm = false;
+      navUi.dryConfirm = false;
+      navUi.deliveryReturnConfirm = false;
+      navUi.deliveryOfferArmed = false;
+      navUi.deliveryHoldAt = null;
+      navUi.deliveryInputKey = '';
+      navUi.deliveryConsumeUntilRelease = false;
+      navUi.deliveryArrivalReady = false;
+      navUi.deliveryArrivalDownAt = null;
+      navUi.deliveryArrivalInputKey = '';
+      navUi.deliveryArrivalConsume = false;
+      // Keep dismissed card/chip state across XR exit and re-entry. A new
+      // task or door assignment, not headset re-entry, rearms the prompt.
       navUi.manualRelocalization = null;
       globalThis.autolifeNavigationCameraPreview = false;
       navUi.panel?.setAttribute('visible', 'false');
@@ -2270,6 +2940,10 @@ AFRAME.registerComponent('autolife-vr-navigation', {
     const left = gamepadForHand(session, 'left');
     const right = gamepadForHand(session, 'right');
     if (!left || !right) {
+      navUi.deliveryArrivalReady = false;
+      navUi.deliveryArrivalDownAt = null;
+      navUi.deliveryOfferArmed = false;
+      navUi.deliveryHoldAt = null;
       setBaseControlLatched(false, false);
       sendBaseDrive(false);
       return;
@@ -2280,8 +2954,79 @@ AFRAME.registerComponent('autolife-vr-navigation', {
     const xPressed = Boolean(leftButtons[4]?.pressed);
     const aPressed = Boolean(rightButtons[4]?.pressed);
     const bPressed = Boolean(rightButtons[5]?.pressed);
+    // Chord ownership lasts until BOTH buttons are up, including staggered
+    // release. Never leak Y+B into height, camera, head-lock or task skip.
+    if (yPressed && !navUi.previous.y) navUi.yPressedAt = performance.now();
+    if ((yPressed && bPressed) || navUi.holdGripperResetChord) {
+      navUi.deliveryArrivalReady = false;
+      navUi.deliveryArrivalDownAt = null;
+      navUi.deliveryOfferArmed = false;
+      navUi.deliveryHoldAt = null;
+      if (!navUi.holdGripperResetChord) {
+        navShowNotice('长按 Y+B 1秒：保持夹爪复位', 2000, '#72f0b1');
+        const headControl = globalThis.autolifeHeadFollowControl;
+        if (headControl?.enabled?.()) void headControl.setEnabled(false);
+      }
+      navUi.holdGripperResetChord = yPressed || bPressed;
+      navUi.quickResetHeightSuppressed = Boolean(navUi.holdGripperResetChord);
+      navUi.taskSkipCancelled = true;
+      navUi.taskHoldCancelled = true;
+      navUi.taskRejectCancelled = true;
+      setBaseControlLatched(false, false);
+      sendBaseDrive(false);
+      Object.assign(navUi.previous, {a: aPressed, b: bPressed, x: xPressed, y: yPressed});
+      return;
+    }
+    if (navUi.exitConfirm) {
+      // Modal confirmation consumes A/X so it cannot also finish a task.
+      const axis = right.axes?.[3] || 0;
+      if (Math.abs(axis) < 0.35) navUi.selectionLatch = false;
+      if (!navUi.exitPending && !navUi.selectionLatch && Math.abs(axis) > 0.68) {
+        navUi.selected = axis > 0 ? 1 : 0;
+        navUi.selectionLatch = true;
+        drawNavigationPanel();
+      }
+      if (!navUi.exitPending && aPressed && !navUi.previous.a && !xPressed) activateNavigationItem();
+      if (!navUi.exitPending && xPressed && !aPressed) {
+        navUi.exitConfirm = false;
+        navUi.selected = 0;
+        drawNavigationPanel();
+      }
+      navUi.previous.a = aPressed;
+      navUi.previous.x = xPressed;
+      return;
+    }
+    if (navUi.skipTaskConfirm) {
+      // This modal owns A/X; confirmation cannot also complete an action.
+      const axis = right.axes?.[3] || 0;
+      if (Math.abs(axis) < .35) navUi.selectionLatch = false;
+      if (!navUi.selectionLatch && Math.abs(axis) > .68) {
+        navUi.selected = axis > 0 ? 1 : 0;
+        navUi.selectionLatch = true;
+        drawNavigationPanel();
+      }
+      if (aPressed && !navUi.previous.a && !xPressed) activateNavigationItem();
+      if (xPressed && !aPressed) {
+        navUi.skipTaskConfirm = null; navUi.selected = 0; drawNavigationPanel();
+      }
+      Object.assign(navUi.previous, {a: aPressed, b: bPressed, x: xPressed, y: yPressed});
+      return;
+    }
+    if (handleDeliveryOfferInput(aPressed, xPressed, yPressed, bPressed, performance.now())) {
+      Object.assign(navUi.previous, {a: aPressed, b: bPressed, x: xPressed, y: yPressed});
+      return;
+    }
+    if (handleDeliveryArrivalInput(aPressed, xPressed, yPressed, bPressed, performance.now())) {
+      Object.assign(navUi.previous, {a: aPressed, b: bPressed, x: xPressed, y: yPressed});
+      return;
+    }
     const taskState = String(navUi.state?.task_dispatch?.state || 'idle');
-    const pendingTaskDecision = taskState === 'pending_confirmation';
+    const deliveryMenuOwnsKeys = navUi.menuVisible && navUi.deliveryMode;
+    // Only the explicit retry row gives long-A ownership to the failed task.
+    // Other menu entries, including delivery actions, retain their own A key.
+    const menuOwnsA = navUi.menuVisible && !(taskState === 'failed'
+      && navUi.items[navUi.selected]?.kind === 'task-retry-pose');
+    const pendingTaskDecision = taskState === 'pending_confirmation' && !menuOwnsA;
     const taskDecisionKey = pendingTaskDecision
       ? `${navUi.state?.task_dispatch?.version ?? ''}:${navUi.state?.task_dispatch?.updated_at ?? ''}`
       : '';
@@ -2301,7 +3046,7 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       navUi.taskAcceptPending = false;
     }
     const taskCanExit = !['idle', 'cancelled', 'completed'].includes(taskState);
-    const taskExitGestureEnabled = taskCanExit && !navUi.baseControlLatched;
+    const taskExitGestureEnabled = taskCanExit && !navUi.baseControlLatched && !deliveryMenuOwnsKeys;
     let taskAConsumed = false;
     // X+A is the guarded quick-reset chord.  It must take priority over the
     // X/Y body-height controls during the whole hold interval, not only after
@@ -2365,18 +3110,21 @@ AFRAME.registerComponent('autolife-vr-navigation', {
         navUi.taskAcceptPending = false;
       });
     }
-    const taskHoldMode = taskState === 'awaiting_action'
-      ? 'complete' : (taskState === 'navigation_failed' ? 'retry-navigation-failure' : '');
+    const taskHoldMode = menuOwnsA ? '' : (taskState === 'awaiting_action'
+      ? 'complete' : (taskState === 'navigation_failed' ? 'retry-navigation-failure'
+        : (taskState === 'failed' && !navUi.baseControlLatched ? 'retry-pose' : '')));
     if (taskHoldMode) {
       taskAConsumed = aPressed || navUi.previous.a;
       if (aPressed && !navUi.previous.a) {
         navUi.taskHoldStartedAt = performance.now();
         navUi.taskHoldMode = taskHoldMode;
+        navUi.taskHoldToken = navUi.state?.task_dispatch?.task_token;
         navUi.taskCompleteLatched = false;
         navUi.taskHoldCancelled = xPressed;
       }
       if (aPressed) {
-        if (xPressed || navUi.taskHoldMode !== taskHoldMode) {
+        if (xPressed || navUi.taskHoldMode !== taskHoldMode
+            || navUi.taskHoldToken !== navUi.state?.task_dispatch?.task_token) {
           navUi.taskHoldCancelled = true;
         }
         const heldMs = performance.now() - navUi.taskHoldStartedAt;
@@ -2386,16 +3134,20 @@ AFRAME.registerComponent('autolife-vr-navigation', {
           navShowNotice(
             taskHoldMode === 'complete'
               ? '松开 A 确认“动作已完成”'
-              : '松开 A 重新前往当前未到达点位',
+              : (taskHoldMode === 'retry-pose' ? '松开 A 重试当前任务姿态，保留后续流程'
+                : '松开 A 重新前往当前未到达点位'),
             2400,
             taskHoldMode === 'complete' ? '#72f0b1' : '#ffcf70'
           );
         }
       } else if (navUi.previous.a) {
-        if (navUi.taskCompleteLatched && !navUi.taskHoldCancelled && !xPressed) {
-          const path = navUi.taskHoldMode === 'complete'
-            ? '/api/tasks/complete' : '/api/tasks/retry-navigation-failure';
-          void navigationAction(path);
+        if (navUi.taskCompleteLatched && !navUi.taskHoldCancelled && !xPressed
+            && navUi.taskHoldMode === taskHoldMode
+            && navUi.taskHoldToken === navUi.state?.task_dispatch?.task_token) {
+          const path = '/api/tasks/' + navUi.taskHoldMode;
+          void navigationAction(path, navUi.taskHoldMode === 'retry-pose' ? {
+            task_token: navUi.taskHoldToken, client_id: globalThis.autolifeVrClientId?.()
+          } : {});
         }
         navUi.taskHoldStartedAt = 0;
         navUi.taskHoldMode = '';
@@ -2408,24 +3160,30 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       navUi.taskCompleteLatched = false;
       navUi.taskHoldCancelled = false;
     }
-    if (taskState === 'navigation_failed') {
+    if (['navigating', 'navigation_failed'].includes(taskState)) {
       if (bPressed && !navUi.previous.b) {
         navUi.taskSkipHoldStartedAt = performance.now();
+        navUi.taskArrivalToken = navUi.state?.task_dispatch?.task_token;
         navUi.taskSkipLatched = false;
-        navUi.taskSkipCancelled = aPressed || xPressed;
+        navUi.taskSkipCancelled = aPressed || xPressed || yPressed || !navUi.taskArrivalToken;
       }
       if (bPressed) {
-        if (aPressed || xPressed) navUi.taskSkipCancelled = true;
+        if (aPressed || xPressed || yPressed
+            || navUi.taskArrivalToken !== navUi.state?.task_dispatch?.task_token) navUi.taskSkipCancelled = true;
         const heldMs = performance.now() - navUi.taskSkipHoldStartedAt;
         if (heldMs >= 1000 && !navUi.taskSkipLatched
             && !navUi.taskSkipCancelled) {
           navUi.taskSkipLatched = true;
-          navShowNotice('松开 B 跳过当前点位并前往下一任务', 2400, '#ffcf70');
+          navShowNotice('松开 B：停止导航并人工确认到达', 2400, '#ffcf70');
         }
       } else if (navUi.previous.b) {
         if (navUi.taskSkipLatched && !navUi.taskSkipCancelled
-            && !aPressed && !xPressed) {
-          void navigationAction('/api/tasks/skip-navigation-failure');
+            && !aPressed && !xPressed && !yPressed
+            && navUi.taskArrivalToken === navUi.state?.task_dispatch?.task_token) {
+          setBaseControlLatched(false, false);
+          void navigationAction('/api/tasks/operator-arrival', {
+            task_token: navUi.taskArrivalToken, client_id: globalThis.autolifeVrClientId?.()
+          });
         } else if (!navUi.taskSkipCancelled) {
           // Preserve the original short-B head-motion toggle.
           toggleHeadMotionLock();
@@ -2438,9 +3196,10 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       navUi.taskSkipHoldStartedAt = 0;
       navUi.taskSkipLatched = false;
       navUi.taskSkipCancelled = false;
-      if (bPressed && !navUi.previous.b) toggleHeadMotionLock();
+      // Act on release so Y can join B without a premature head toggle.
+      if (!bPressed && navUi.previous.b && !yPressed) toggleHeadMotionLock();
     }
-    if (!navUi.baseControlLatched && yPressed && !navUi.previous.y) {
+    if (!navUi.baseControlLatched && !yPressed && navUi.previous.y && !bPressed) {
       if (navUi.manualRelocalization) cancelManualRelocalization();
       else if (navUi.namingActive) cancelWaypointNameEntry();
       else toggleNavigationSession();
@@ -2460,7 +3219,7 @@ AFRAME.registerComponent('autolife-vr-navigation', {
     } else {
       if (!navUi.namingActive && !navUi.manualRelocalization
           && leftStickPressed && !navUi.previous.leftStick) {
-        setBaseControlLatched(!navUi.baseControlLatched);
+        setBaseControlLatched(!navUi.baseControlLatched, true, navUi.baseControlLatched);
       }
       if (
         navUi.visible
@@ -2473,7 +3232,7 @@ AFRAME.registerComponent('autolife-vr-navigation', {
         navUi.menuVisible = !navUi.menuVisible;
         navUi.selectionLatch = false;
         navShowNotice(
-          navUi.menuVisible ? '航点菜单已打开' : '航点菜单已收起',
+          navUi.menuVisible ? '菜单和地图已打开' : '菜单和地图已收起',
           1500,
           '#68e1ff'
         );
@@ -2486,7 +3245,8 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       // Release height ownership immediately.  The drive worker is
       // latest-frame-only, so this replaces any queued lowering sample.
       navUi.bodyHeightEngaged = false;
-    } else if (deadman && !pendingTaskDecision && xPressed !== yPressed) {
+    } else if (deadman && !pendingTaskDecision && xPressed !== yPressed
+        && (!yPressed || performance.now() - (navUi.yPressedAt || 0) >= 250)) {
       // X lowers the body and Y raises it. The height profile stays engaged
       // until chassis takeover is cancelled, so releasing a key holds height.
       bodyHeightDirection = xPressed ? 1 : -1;
@@ -2538,15 +3298,28 @@ AFRAME.registerComponent('autolife-vr-navigation', {
       } else if (navUi.menuVisible) {
         const horizontalAxis = rightAxes[2] || 0;
         const selectionAxis = rightAxes[3] || 0;
+        if (vrCustom.mode) {
+          if (Math.max(Math.abs(horizontalAxis), Math.abs(selectionAxis)) < 0.35) navUi.selectionLatch = false;
+          if (!navUi.selectionLatch && Math.max(Math.abs(horizontalAxis), Math.abs(selectionAxis)) > 0.68) {
+            if (Math.abs(horizontalAxis) > Math.abs(selectionAxis)) vrCustom.move(Math.sign(horizontalAxis), 0);
+            else vrCustom.move(0, Math.sign(selectionAxis));
+            navUi.selectionLatch = true;
+          }
+        } else {
         const selectedItem = navUi.items[navUi.selected];
         if (Math.abs(horizontalAxis) < 0.35) navUi.forceAdjustLatch = false;
         if (
-          selectedItem?.kind === 'gripper-force'
+          (selectedItem?.kind === 'gripper-force'
+            || selectedItem?.kind === 'template-start-task')
           && !navUi.forceAdjustLatch
           && Math.abs(horizontalAxis) > 0.68
           && Math.abs(horizontalAxis) > Math.abs(selectionAxis)
         ) {
-          adjustGripperForce(horizontalAxis > 0 ? 1 : -1);
+          if (selectedItem?.kind === 'template-start-task') {
+            adjustTemplateStartTask(horizontalAxis > 0 ? 1 : -1);
+          } else {
+            adjustGripperWidth(horizontalAxis > 0 ? 1 : -1);
+          }
           navUi.forceAdjustLatch = true;
         }
         if (Math.abs(selectionAxis) < 0.35) navUi.selectionLatch = false;
@@ -2562,13 +3335,21 @@ AFRAME.registerComponent('autolife-vr-navigation', {
           navUi.selectionLatch = true;
           drawNavigationPanel();
         }
+        }
         if (aPressed && !navUi.previous.a && !xPressed && !taskAConsumed) activateNavigationItem();
       }
       if (!navUi.manualRelocalization
           && !navUi.namingActive
           && !taskCanExit
+          && !deliveryOfferPending()
           && xPressed && !navUi.previous.x && !aPressed) {
-        void navigationAction('/api/navigation/relocalize');
+        if (navUi.deliveryCardActive) {
+          navUi.deliveryCardActive = false;
+          navUi.deliveryCardArmed = false;
+          drawNavigationPanel();
+        } else {
+          void navigationAction('/api/navigation/relocalize');
+        }
       }
     }
     navUi.previous = {
@@ -2587,6 +3368,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const config = await fetch('/api/config', { cache: 'no-store' }).then(response => response.json());
     scheduleNavigationVersionCheck(config.navigation?.ui_version);
     navUi.enabled = config.navigation?.enabled === true;
+    navUi.gripperWidthCm = Number(config.navigation?.gripper_closed_width_cm ?? 0.0);
     navUi.precisionDepthEnabled = config.navigation?.precision_cloud?.enabled === true;
     navUi.depthMinimumM = Number(
       config.navigation?.precision_cloud?.minimum_m ?? 0.20
@@ -2594,25 +3376,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     navUi.depthMaximumM = Number(
       config.navigation?.precision_cloud?.maximum_m ?? 5.0
     );
-    navUi.gripperForceMinimumRatio = Number(
-      config.navigation?.gripper_force_minimum_ratio ?? 0.2
-    );
-    navUi.gripperForceStep = Number(config.navigation?.gripper_force_step ?? 0.1);
-    navUi.gripperForceMaximumCurrent = Number(
-      config.navigation?.gripper_force_maximum_current ?? 10.0
-    );
     navUi.showroomModeEnabled = config.navigation?.showroom_mode_enabled === true;
-    const savedForceRaw = window.localStorage.getItem(
-      'autolife-vr-gripper-force-ratio'
-    );
-    const savedForce = savedForceRaw === null ? Number.NaN : Number(savedForceRaw);
-    navUi.gripperForceRatio = Number.isFinite(savedForce)
-      ? Math.max(navUi.gripperForceMinimumRatio, Math.min(1.0, savedForce))
-      : Number(config.navigation?.gripper_force_ratio ?? 1.0);
   } catch (error) {
     console.warn('Navigation configuration unavailable:', error);
   }
   if (!navUi.enabled) return;
+  const voiceToggle = document.getElementById('voiceEnabledToggle');
+  if (voiceToggle) {
+    voiceToggle.disabled=false;
+    voiceToggle.checked=false;
+    voiceToggle.addEventListener('change', async () => {
+      const requested=voiceToggle.checked;
+      voiceToggle.dataset.pending='1';voiceToggle.disabled=true;
+      try {
+        const response=await fetch('/api/navigation/voice-enabled',{
+          method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:requested})});
+        const result=await response.json();
+        if(!response.ok || !result.success) throw Error(result.message || '切换失败');
+        voiceToggle.checked=result.enabled;
+      } catch(error) {voiceToggle.checked=!requested;navShowNotice(String(error),3000,'#ff8b8b');}
+      finally {delete voiceToggle.dataset.pending;voiceToggle.disabled=false;void refreshNavigationState();}
+    });
+  }
   const showroomToggle = document.getElementById('showroomModeToggle');
   if (showroomToggle) {
     showroomToggle.checked = navUi.showroomModeEnabled;

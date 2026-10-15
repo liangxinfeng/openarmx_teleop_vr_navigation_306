@@ -7,6 +7,8 @@
   <license>Proprietary</license>
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
+  <exec_depend>control_center_service_manager</exec_depend>
+  <depend>rcl_interfaces</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>sensor_msgs</depend>
@@ -23,6 +25,8 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-aiohttp</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <!-- Desktop Logo server runs under /usr/bin/python3, not the VR venv. -->
+  <exec_depend>python3-xlib</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

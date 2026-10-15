@@ -1,0 +1,11 @@
+{
+  "_comment": "283 配送机器人洗衣房交接（只调用本仓 /api/ops，不直连云迹）。改完保存即热加载生效，无需重启。base_url 不带 /api/ops 后缀。proxy_url 仅在必须走现场代理出网时填写，默认空=直连并忽略 shell 代理变量。pickup_task_chain：下单后在 VR 通知卡接受时启动的任务串名称；return_task_chain：菜单呼叫配送时启动的任务串名称。两者须存在于 task_actions.txt，留空禁用对应自动联动。",
+  "base_url": "",
+  "hotel_id": "",
+  "poll_interval_seconds": 3.0,
+  "request_timeout_seconds": 5.0,
+  "allow_lan_addresses": false,
+  "proxy_url": "",
+  "pickup_task_chain": "",
+  "return_task_chain": ""
+}

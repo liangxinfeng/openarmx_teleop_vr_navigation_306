@@ -13,7 +13,21 @@ function getClientInstanceId() {
   }
 }
 
+function explicitExitFlag(value) {
+  const url = new URL(window.location.href);
+  if (value !== undefined) {
+    if (value) url.searchParams.set('vr_idle', '1');
+    else url.searchParams.delete('vr_idle');
+    window.history.replaceState(null, '', url);
+  }
+  try {
+    if (value !== undefined) window.sessionStorage.setItem('vr-explicitly-exited', value ? 'yes' : 'no');
+    return url.searchParams.has('vr_idle') || window.sessionStorage.getItem('vr-explicitly-exited') === 'yes';
+  } catch (_) { return url.searchParams.has('vr_idle'); }
+}
+
 const state = {
+  controlRequested: !explicitExitFlag(),
   config: null,
   clientInstanceId: getClientInstanceId(),
   websocket: null,
@@ -167,6 +181,7 @@ function setServerUrl() {
 }
 
 function hardwareControlIsOnOrBusy() {
+  if (!state.controlRequested) return false;
   const teleop = state.teleop.status;
   const backendState = String(teleop?.state || '').toLowerCase();
   return Boolean(
@@ -298,6 +313,17 @@ function renderHardwareControl() {
   const waistToggle = document.getElementById('waistFollowToggle');
   const headToggle = document.getElementById('headFollowToggle');
   if (!card || !label || !detail || !button) return;
+
+  if (!state.controlRequested) {
+    card.classList.remove('is-busy', 'is-on', 'is-error');
+    card.classList.add('is-off');
+    button.classList.remove('is-disable-action');
+    label.textContent = '已退出VR遥操';
+    detail.textContent = '当前头显已释放接管；可长按重新进入，也可换其他头显。';
+    setHardwareButtonText(button, '按住 1 秒，复位到遥操准备姿态');
+    button.disabled = !state.teleop.available || Boolean(state.teleop.status?.dry_run);
+    return;
+  }
 
   card.classList.remove('is-off', 'is-busy', 'is-on', 'is-error');
   button.classList.remove('is-disable-action');
@@ -530,13 +556,14 @@ async function maybeEnableAfterFreshVr() {
     renderHardwareControl();
     return;
   }
-  if (!vrInputIsFresh()) return;
+  if (state.websocket?.readyState !== WebSocket.OPEN || !vrInputIsFresh()) return;
   cancelDeferredHardwareEnable('已检测到实时 VR 手柄，正在执行安全使能。');
   await requestHardwareEnabled(true);
 }
 
 async function requestHardwareEnabled(enabled) {
   if (state.teleop.requestPending) return;
+  if (enabled && state.websocket?.readyState !== WebSocket.OPEN) return;
   if (!enabled) cancelDeferredHardwareEnable();
   state.teleop.requestPending = true;
   state.teleop.lastRequestMessage = '';
@@ -547,6 +574,7 @@ async function requestHardwareEnabled(enabled) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         enabled,
+        client_id: state.clientInstanceId,
         waist_follow_enabled: enabled
           ? Boolean(document.getElementById('waistFollowToggle')?.checked)
           : undefined,
@@ -725,7 +753,7 @@ function finishHardwareEnableHold(event) {
   cancelHardwareEnableHold();
   if (!confirmed) return;
   if (event) event.preventDefault();
-  if (vrInputIsFresh()) {
+  if (state.websocket?.readyState === WebSocket.OPEN && vrInputIsFresh()) {
     cancelDeferredHardwareEnable('已检测到实时 VR 手柄，正在执行安全使能。');
     void requestHardwareEnabled(true);
     return;
@@ -743,6 +771,12 @@ function beginHardwareEnableHold(event) {
     || state.teleop.enableAfterFreshVr
   ) return;
   event.preventDefault();
+  if (!state.controlRequested) {
+    state.controlRequested = true;
+    explicitExitFlag(false);
+    connectWebSocket();
+    window.dispatchEvent(new Event('vr-control-requested'));
+  }
   if (state.teleop.holdTimer !== null) return;
   state.teleop.holdTriggered = false;
   button.classList.remove('is-holding');
@@ -828,6 +862,7 @@ function websocketUrl() {
 }
 
 function connectWebSocket() {
+  if (!state.controlRequested) return;
   if (state.websocket && [WebSocket.CONNECTING, WebSocket.OPEN].includes(state.websocket.readyState)) return;
   const url = websocketUrl();
   const websocket = new WebSocket(url);
@@ -849,6 +884,7 @@ function connectWebSocket() {
     if (state.websocket !== websocket) return;
     state.websocket = null;
     closeRealtimeChannel();
+    if (!state.controlRequested) return;
     setStatus('VR data disconnected; reconnecting...');
     state.teleop.lastRequestMessage = 'VR 数据连接暂时中断，机器人保持当前位置；正在自动重连。';
     renderHardwareControl();
@@ -860,6 +896,27 @@ function connectWebSocket() {
     }
   };
 }
+
+globalThis.autolifeVrControlRequested = () => state.controlRequested;
+globalThis.autolifeVrClientId = () => state.clientInstanceId;
+globalThis.autolifeExitVrSession = async () => {
+  if (state.teleop.requestPending) throw new Error('使能请求正在处理中，请先等待完成或取消');
+  cancelDeferredHardwareEnable();
+  const response = await fetch('/api/session/exit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({client_id: state.clientInstanceId})
+  });
+  const result = await response.json();
+  if (!response.ok || !result.success) throw new Error(result.message || '安全退出未完成');
+  state.controlRequested = false;
+  explicitExitFlag(true);
+  if (state.reconnectTimer) window.clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+  closeRealtimeChannel();
+  state.websocket?.close();
+  try { await document.querySelector('a-scene')?.exitVR(); } catch (_) {}
+  window.location.reload();
+};
 
 function scheduleRealtimeReconnect() {
   if (

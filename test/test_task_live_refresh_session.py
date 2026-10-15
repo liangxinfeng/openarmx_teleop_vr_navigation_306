@@ -56,7 +56,7 @@ def test_catalog_sequence_preserves_order_duplicates_and_configured_height(tmp_p
         ("前台区", "拿水"),
         ("迎宾区", "迎宾接待"),
     ]
-    assert tasks[1]["body_height_level"] == 4
+    assert tasks[1]["body_lowering_cm"] == 14
 
 
 def test_catalog_hot_reload_detects_new_source_content(tmp_path):

@@ -58,6 +58,18 @@ def service_active() -> bool:
     return result.stdout.strip() == "active"
 
 
+def check_logo_runtime() -> None:
+    """Check the actual system-Python entry before changing display/services."""
+    try:
+        result = command(["/usr/bin/python3", str(LOGO_SERVER), "--help"], timeout=8.0)
+    except subprocess.TimeoutExpired as error:
+        raise StartupError("Logo 页面依赖检查超时，尚未启动遥操。") from error
+    if result.returncode != 0:
+        detail = "\n".join(result.stdout.strip().splitlines()[-4:])
+        hint = "请安装系统依赖 python3-xlib。" if "No module named 'Xlib'" in detail else "请检查 Logo 服务运行依赖。"
+        raise StartupError(f"Logo 页面启动检查失败：{hint}\n{detail}")
+
+
 def port_available(host: str = "127.0.0.1", port: int = 8088) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -247,6 +259,7 @@ class VrNavigationDesktopApp:
     def _startup_worker(self) -> None:
         try:
             check_main_stack_idle()
+            check_logo_runtime()
             self.logo_service_was_active = service_active()
             if self.logo_service_was_active:
                 result = command(
@@ -425,19 +438,26 @@ def validate(robot_id: str, entry: Path) -> int:
         "logo_image": LOGO_IMAGE,
     }
     missing = [name for name, path in paths.items() if not path.is_file()]
+    errors = []
+    if not missing:
+        try:
+            check_logo_runtime()
+        except StartupError as error:
+            errors.append(str(error))
     print(
         json.dumps(
             {
-                "success": not missing,
+                "success": not missing and not errors,
                 "robot_id": robot_id,
                 "webkit": "WebKit2 4.1",
                 "entry": str(entry),
                 "missing": missing,
+                "errors": errors,
             },
             ensure_ascii=False,
         )
     )
-    return 0 if not missing else 2
+    return 0 if not missing and not errors else 2
 
 
 def main() -> int:

@@ -1,0 +1,24 @@
+const fs=require('fs'),assert=require('assert/strict');
+const text=fs.readFileSync(process.argv[2],'utf8');
+const start=text.indexOf('  if (navUi.deliveryMode) {');
+const end=text.indexOf('\n  return [',start);
+assert(start>0&&end>start);
+const menu=new Function('navUi','deliveryHandoff',text.slice(start,end));
+const ui={deliveryMode:true};let h={state:'opened',can_close:true,door_id:'2',room_no:'101'};
+assert(menu(ui,()=>h).some(i=>i.kind==='delivery-close'));
+h={state:'ready_to_open',can_close:false};assert(!menu(ui,()=>h).some(i=>i.kind==='delivery-close'));
+ui.deliveryCloseConfirm={door_id:'2',room:'101'};
+assert.deepEqual(menu(ui,()=>h).map(i=>i.kind),['cancel-delivery-close','confirm-delivery-close']);
+const a=text.indexOf("  } else if (item.kind === 'delivery-close') {");
+const b=text.indexOf("  } else if (item.kind === 'delivery-open') {",a);
+const run=new Function('item','navUi','deliveryHandoff','deliveryDoorPayload','navShowNotice','drawNavigationPanel','navigationAction',
+  'if(false) {'+text.slice(a,b)+'}');
+const calls=[];h={state:'opened',can_close:true,order_id:'o',task_id:'trip',door_id:'2',room_no:'101'};
+const action=(kind)=>run({kind},ui,()=>h,()=>({order_id:h.order_id,task_id:h.task_id,door_id:h.door_id,client_id:'headset'}),()=>{},()=>{},(...x)=>calls.push(x));
+action('delivery-close');assert.equal(calls.length,0);assert.equal(ui.deliveryCloseConfirm.door_id,'2');
+h.door_id='3';action('confirm-delivery-close');assert.equal(calls.length,1);
+assert(calls[0][0].endsWith('/close'));assert.equal(calls[0][1].door_id,'2');assert(calls[0][1].confirmed);
+action('confirm-delivery-close');assert.equal(calls.length,1);
+assert(text.includes("const taskHoldMode = menuOwnsA ? ''"));
+assert(text.includes("const pendingTaskDecision = taskState === 'pending_confirmation' && !menuOwnsA"));
+console.log('PASS: close menu, explicit confirmation, captured trip/door, duplicate guard, task-key isolation');

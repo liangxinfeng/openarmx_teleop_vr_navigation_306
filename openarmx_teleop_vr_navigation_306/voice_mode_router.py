@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import rclpy
+import json
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -11,30 +12,34 @@ from std_msgs.msg import Bool, String
 from text_voice_control.command_parser import parse_voice_command
 
 
-def should_forward_control_center_voice(showroom_mode_enabled: bool) -> bool:
+def should_forward_control_center_voice(showroom_mode_enabled: bool, voice_enabled=False, task_active=False) -> bool:
     """The control-center and showroom speech paths must be mutually exclusive."""
-    return not bool(showroom_mode_enabled)
+    return bool(voice_enabled) and not bool(showroom_mode_enabled) and not bool(task_active)
 
 
 class VoiceModeRouter(Node):
-    """Forward control-center prompts to the vendor TTS outside showroom mode."""
+    """Route normal navigation to the same opt-in player as task speech."""
 
     def __init__(self) -> None:
         super().__init__('openarmx_navigation_voice_mode_router_306')
         self.declare_parameter('input_topic', '/text_voice_command')
-        self.declare_parameter('tts_topic', '/topic_tts_0_307')
+        self.declare_parameter('tts_topic', '/openarmx_teleop_vr_navigation_306/task_speech')
         self.declare_parameter(
             'showroom_mode_topic',
             '/openarmx_teleop_vr_navigation_306/showroom_mode',
         )
 
         self._showroom_mode_enabled = False
+        self._voice_enabled = False
+        self._task_active = False
         self._tts_publisher = self.create_publisher(
             String, str(self.get_parameter('tts_topic').value), 10
         )
         mode_qos = QoSProfile(depth=1)
         mode_qos.reliability = ReliabilityPolicy.RELIABLE
         mode_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.create_subscription(String, '/openarmx_teleop_vr_navigation_306/voice_state',
+                                 self._on_voice_state, mode_qos)
         self.create_subscription(
             Bool,
             str(self.get_parameter('showroom_mode_topic').value),
@@ -48,9 +53,17 @@ class VoiceModeRouter(Node):
             10,
         )
         self.get_logger().info(
-            'Voice mode router ready: showroom off=control-center voice, '
-            'showroom on=task/showroom voice'
+            'Voice router ready: checkbox defaults off; enabled navigation and task prompts use one player'
         )
+
+    def _on_voice_state(self, message):
+        try:
+            state=json.loads(message.data)
+            self._voice_enabled=state.get('enabled') is True
+            self._task_active=state.get('task_active') is True
+            self._showroom_mode_enabled=state.get('showroom') is True
+        except (TypeError, ValueError, AttributeError):
+            self._voice_enabled=False
 
     def _on_showroom_mode(self, message: Bool) -> None:
         enabled = bool(message.data)
@@ -61,7 +74,7 @@ class VoiceModeRouter(Node):
         self.get_logger().info(f'Active navigation voice: {active_voice}')
 
     def _on_control_center_voice(self, message: String) -> None:
-        if not should_forward_control_center_voice(self._showroom_mode_enabled):
+        if not should_forward_control_center_voice(self._showroom_mode_enabled, self._voice_enabled, self._task_active):
             return
         command = parse_voice_command(message.data)
         if command is None:

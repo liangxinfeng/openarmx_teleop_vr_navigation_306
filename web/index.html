@@ -6,8 +6,9 @@
     <meta name="description" content="Autolife 306 VR arm teleoperation and navigation">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="vendor/aframe.min.js"></script>
-    <script src="vr_app.js?v=autolife-306-v2-navigation-31-task-templates" defer></script>
-    <script src="nav_app.js?v=yundie-306-navigation-50-map-70-v47" defer></script>
+    <script src="vr_app.js?v=yundie-306-navigation-283-delivery-menu-v2026101303" defer></script>
+    <script src="vr_custom_controls.js?v=yundie-306-navigation-283-delivery-menu-v2026101303" defer></script>
+    <script src="nav_app.js?v=yundie-306-navigation-283-delivery-menu-v2026101303" defer></script>
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="nav_styles.css">
   </head>
@@ -43,8 +44,12 @@
           <input id="showroomModeToggle" type="checkbox" disabled>
           <span>
             <strong>展厅模式</strong>
-            <small>手动选择单个航点时，同样执行任务语音与到达确认流程</small>
+            <small>单航点按任务流程执行；语音需另外勾选</small>
           </span>
+        </label>
+        <label class="follow-option" for="voiceEnabledToggle">
+          <input id="voiceEnabledToggle" type="checkbox" disabled>
+          <span><strong>语音播报</strong><small id="voiceHealthLabel">未勾选不加载播报引擎、不播放导航或任务提示</small></span>
         </label>
         </div>
         <button id="hardwareToggleButton" class="hardware-toggle-button" type="button" disabled>
@@ -57,12 +62,12 @@
           桌面双臂模式：同时长按左右摇杆按键 1 秒切换。切换后先放稳头显和双手柄，提示就绪后松开并重新按腰键接管。
         </div>
         <div class="navigation-hint">
-          <strong>VR 导航：</strong>任意画面下单击左摇杆键均可接管/取消底盘；左摇杆控制前后/横移，右摇杆控制转向。接管后 X 降低身体、Y 升高身体。按 Y 打开导航，右摇杆键显示菜单；夹爪力度项用右摇杆左右调节。
+          <strong>VR 导航：</strong>任意画面下单击左摇杆键均可接管/取消底盘；左摇杆控制前后/横移，右摇杆控制转向。接管后 X 降低身体、Y 升高身体。按 Y 打开导航，右摇杆键显示菜单；夹爪闭合宽度项用右摇杆左右调节。
         </div>
       </section>
       <button id="startVrButton" class="start-button" type="button">进入 VR 遥操</button>
       <button id="cameraModeButton" class="camera-mode-button" type="button">
-        图像模式：进入VR后按 Y 依次切换透视 / RGB / 深度点云
+        图像模式：进入VR后短按 Y 切换；长按 X+A 1秒常规复位，长按 Y+B 1秒保持夹爪复位。
       </button>
       <div id="statusText" class="status-text">正在准备...</div>
     </main>

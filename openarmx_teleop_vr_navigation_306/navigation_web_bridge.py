@@ -15,10 +15,12 @@ from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from nav_msgs.msg import OccupancyGrid
 from nav2_msgs.srv import LoadMap
 import rclpy
+from rclpy.parameter import Parameter
+from rcl_interfaces.srv import SetParametersAtomically
 from rclpy.executors import ExternalShutdownException
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Trigger
+from std_srvs.srv import Trigger, SetBool
 from visualization_msgs.msg import Marker, MarkerArray
 import yaml
 
@@ -30,6 +32,10 @@ from control_center_navigation.srv import (
     SwitchWaypointMap,
 )
 from openarmx_teleop_vr_306_v4.vr_web_bridge import VrWebBridge
+from openarmx_teleop_vr_306_v4.gripper_aperture import checked_width, load_width
+from .delivery_handoff import DeliveryHandoffMonitor
+from .simple_task_catalog import load_catalog, lowering_cm, head_pitch_deg
+from .session_controls import task_menu_catalog, compose_menu_tasks, pose_values
 from .depth_cloud_stream import DepthCloudStream
 from .task_workflow import (
     TaskWorkflow,
@@ -77,20 +83,20 @@ def task_voice_text(event, task, showroom_single=False):
     action = str((task or {}).get('task', '')).strip()
     if event == 'departure':
         if showroom_single:
-            return f'前往{location}执行任务。'
-        return f'开始导航，前往{location}执行{action}。'
+            return f'出发喽，前往{location}。'
+        return f'出发喽，去{location}，任务是{action}。'
     if event == 'ready':
         if showroom_single:
-            return '已确认周围环境安全，开始执行任务。'
-        return f'已确认周围环境安全，开始执行任务：{action}。'
+            return '准备就绪，开工啦。'
+        return f'准备就绪，开始{action}。'
     if event == 'arrived':
         if showroom_single:
-            return f'已到达{location}，已确认周围环境安全，开始执行任务。'
-        return f'已到达{location}，已确认周围环境安全，开始执行任务：{action}。'
+            return f'{location}到了，准备开工。'
+        return f'{location}到了，准备{action}。'
     if event == 'completed':
         if showroom_single:
-            return f'{location}任务已完成。'
-        return f'{action}已完成。'
+            return f'{location}任务完成啦。'
+        return f'{action}完成啦。'
     raise ValueError(f'unsupported task voice event: {event}')
 
 
@@ -169,11 +175,11 @@ class NavigationVrWebBridge(VrWebBridge):
         )
         self.declare_parameter(
             'left_gripper_force_ratio_topic',
-            '/control_set_left_gripper_force_ratio_0_307',
+            '/control_set_left_gripper_force_ratio_0_300',
         )
         self.declare_parameter(
             'right_gripper_force_ratio_topic',
-            '/control_set_right_gripper_force_ratio_0_307',
+            '/control_set_right_gripper_force_ratio_0_300',
         )
         self.declare_parameter('gripper_force_minimum_ratio', 0.0)
         self.declare_parameter('gripper_force_maximum_current', 10.0)
@@ -181,18 +187,19 @@ class NavigationVrWebBridge(VrWebBridge):
         # waiting after the robot reaches the task point.  Height feedback may
         # complete sooner; 1.25 s is only the fail-open upper bound.
         self.declare_parameter('task_height_timeout_seconds', 1.25)
+        self.declare_parameter('task_head_wait_timeout_seconds', 120.0)
         self.declare_parameter('task_height_stable_seconds', 0.125)
         package_share = Path(
             get_package_share_directory('openarmx_teleop_vr_navigation_306')
         )
         source_task_catalog = Path(
-            '/home/ubuntu/ros2_ws/src/openarmx_teleop_vr_navigation_306/config/task_actions.json'
+            '/home/ubuntu/ros2_ws/src/openarmx_teleop_vr_navigation_306/config/task_actions.txt'
         )
         self.declare_parameter(
             'task_catalog_path', str(
                 source_task_catalog
                 if source_task_catalog.is_file()
-                else package_share / 'config' / 'task_actions.json'
+                else package_share / 'config' / 'task_actions.txt'
             )
         )
         self.declare_parameter(
@@ -201,6 +208,17 @@ class NavigationVrWebBridge(VrWebBridge):
         self.declare_parameter(
             'showroom_mode_topic',
             '/openarmx_teleop_vr_navigation_306/showroom_mode',
+        )
+        source_delivery_config = Path(
+            '/home/ubuntu/ros2_ws/src/openarmx_teleop_vr_navigation_306'
+            '/config/delivery_handoff.json'
+        )
+        self.declare_parameter(
+            'delivery_handoff_config_path', str(
+                source_delivery_config
+                if source_delivery_config.is_file()
+                else package_share / 'config' / 'delivery_handoff.json'
+            )
         )
 
         self._nav_lock = threading.Lock()
@@ -217,6 +235,8 @@ class NavigationVrWebBridge(VrWebBridge):
         self._waypoint_query_generation = 0
 
         self._drive_lock = threading.Lock()
+        self._exit_in_progress = False
+        self._drive_session_generation = 0
         self._drive_sample = None
         self._drive_time = 0.0
         self._drive_was_active = False
@@ -224,12 +244,17 @@ class NavigationVrWebBridge(VrWebBridge):
         self._last_drive_tick = time.monotonic()
         self._drive_settle_until = 0.0
         self._pause_requested_for_drive = False
+        self._drive_pause_retry_at = 0.0
         self._navigation_paused_for_drive = False
         self._resume_requested_for_drive = False
-        self._drive_resume_retry_at = 0.0
+        self._task_intervention = False
         self._navigation_websocket = None
         self._drive_websocket = None
-        self._gripper_force_ratio = 1.0
+        self._gripper_force_ratio = 0.35
+        self._gripper_width_client = self.create_client(
+            SetParametersAtomically,
+            '/independent_vr_mapper_306_v4/set_parameters_atomically',
+        )
         self._corridor_lock = threading.Lock()
         self._corridor_payload = None
         self._corridor_received_at = 0.0
@@ -271,15 +296,22 @@ class NavigationVrWebBridge(VrWebBridge):
         self._task_catalog_path = Path(
             str(self.get_parameter('task_catalog_path').value)
         ).expanduser().resolve()
-        task_catalog = json.loads(self._task_catalog_path.read_text(encoding='utf-8'))
-        catalog_stat = self._task_catalog_path.stat()
-        self._task_catalog_revision = (
-            catalog_stat.st_mtime_ns, catalog_stat.st_size
-        )
+        self._task_catalog_error = ''
+        self._task_catalog_revision = None
+        try:
+            task_catalog = load_catalog(self._task_catalog_path)
+            catalog_stat = self._task_catalog_path.stat()
+            self._task_catalog_revision = (catalog_stat.st_mtime_ns, catalog_stat.st_size)
+        except (OSError, TypeError, ValueError) as error:
+            task_catalog = {}
+            self._task_catalog_error = str(error)
+            self.get_logger().error(f'任务库未加载：{error}；VR遥操仍可使用')
         self._task_workflow = TaskWorkflow(task_catalog)
         self._task_templates = task_chain_templates(task_catalog)
         showroom = task_catalog.get('showroom_mode', {})
         self._showroom_mode_enabled = False
+        self._voice_enabled = False
+        self._speech_health = {'state': 'disabled'}
         self._showroom_single_task_active = False
         self._showroom_waypoint_task = str(
             showroom.get('single_waypoint_task', '展厅定点服务')
@@ -294,9 +326,34 @@ class NavigationVrWebBridge(VrWebBridge):
             0.05, float(self.get_parameter('task_height_stable_seconds').value)
         )
         self._task_height_lock = threading.Lock()
-        self._task_height_target_level = None
+        self._task_height_target_m = None
+        self._task_transit_pose_error = ''
         self._task_height_deadline = 0.0
         self._task_height_stable_since = 0.0
+        self._task_head_pitch_deg = None
+        self._task_head_request_id = ''
+        self._task_pose_pause = None
+        self._task_pose_owner = None
+        self._task_head_wait_deadline = 0.0
+        self._manual_pose_status = {'state': 'idle', 'message': ''}
+        self._pose_is_manual = False
+        # Delivery-robot handoff polling runs on its own serial thread; the
+        # config file is hot-reloaded so the site can point 283 at the hotel
+        # ops server without a rebuild or restart.
+        self._delivery_handoff = DeliveryHandoffMonitor(
+            Path(
+                str(self.get_parameter('delivery_handoff_config_path').value)
+            ).expanduser().resolve(),
+            self.get_logger(),
+        )
+        self._delivery_handoff.start()
+        # Keep the concurrent delivery-order task-dispatch integration.
+        self._delivery_seen_orders = set()
+        self._delivery_offer_lock = threading.Lock()
+        self._delivery_chain_note = None
+        # Outbound orders surface a task offer card (A accept / X reject);
+        # the operator decides, nothing auto-submits.
+        self._delivery_offer = None
 
         transient_qos = QoSProfile(depth=1)
         transient_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -324,6 +381,9 @@ class NavigationVrWebBridge(VrWebBridge):
             str(self.get_parameter('body_height_command_topic').value),
             10,
         )
+        self._task_head_publisher = self.create_publisher(
+            String, '/openarmx_teleop_vr_306_v4/task_head_target', 1
+        )
         self._left_gripper_force_publisher = self.create_publisher(
             String,
             str(self.get_parameter('left_gripper_force_ratio_topic').value),
@@ -342,6 +402,11 @@ class NavigationVrWebBridge(VrWebBridge):
             str(self.get_parameter('showroom_mode_topic').value),
             status_qos,
         )
+        self._voice_state_publisher = self.create_publisher(
+            String, '/openarmx_teleop_vr_navigation_306/voice_state', transient_qos)
+        self.create_subscription(String, '/openarmx_teleop_vr_navigation_306/speech_health',
+            self._on_speech_health, transient_qos)
+        self.create_timer(1.0, self._publish_voice_state)
         self._publish_showroom_mode()
         self.create_subscription(
             OccupancyGrid,
@@ -390,6 +455,8 @@ class NavigationVrWebBridge(VrWebBridge):
         self._pause_navigation_client = self.create_client(Trigger, '/pause_navigation')
         self._cancel_navigation_client = self.create_client(Trigger, '/cancel_navigation')
         self._resume_navigation_client = self.create_client(Trigger, '/resume_navigation')
+        self._stop_ready_client = self.create_client(Trigger, '/navigation_stop_ready')
+        self._operator_arrival_client = self.create_client(NavigateToWaypoint, '/operator_confirm_arrival')
         self._relocalize_client = self.create_client(
             Trigger, str(self.get_parameter('relocalization_service').value)
         )
@@ -400,6 +467,7 @@ class NavigationVrWebBridge(VrWebBridge):
         self.create_timer(0.02, self._drive_tick)
         self.create_timer(1.0, self._request_waypoint_list)
         self.create_timer(0.05, self._task_height_tick)
+        self.create_timer(1.0, self._delivery_chain_tick)
 
         self._base_web_dir = self._web_dir
         self._web_dir = (
@@ -434,7 +502,7 @@ class NavigationVrWebBridge(VrWebBridge):
         payload = json.loads(base_response.text)
         payload['navigation'] = {
             'enabled': True,
-            'ui_version': 'yundie-306-navigation-50-map-70-v48-task-retry',
+            'ui_version': 'yundie-300-template-start-v2026101401',
             'panel_toggle_button': 'Y',
             'confirm_button': 'A',
             'relocalize_button': 'X',
@@ -444,6 +512,7 @@ class NavigationVrWebBridge(VrWebBridge):
             'websocket_path': '/navigation/ws',
             'drive_websocket_path': '/navigation/drive',
             'gripper_force_ratio': self._gripper_force_ratio,
+            'gripper_closed_width_cm': load_width(),
             'gripper_force_minimum_ratio': float(
                 self.get_parameter('gripper_force_minimum_ratio').value
             ),
@@ -452,6 +521,7 @@ class NavigationVrWebBridge(VrWebBridge):
             ),
             'gripper_force_step': 0.1,
             'showroom_mode_enabled': self._showroom_mode_enabled,
+            'voice_enabled': self._voice_enabled,
             'precision_cloud': {
                 'enabled': self._precision_cloud_stream is not None,
                 'websocket_path': '/navigation/precision-cloud',
@@ -594,7 +664,7 @@ class NavigationVrWebBridge(VrWebBridge):
         waypoint = str(status.get('active_waypoint', '')).strip()
         outcome = navigation_terminal_outcome(state)
         if outcome == 'succeeded':
-            task = self._task_workflow.navigation_arrived(waypoint)
+            task = self._task_workflow.navigation_arrived(waypoint, operator=state == 'operator_arrived')
             if task is not None:
                 # One concise arrival cue replaces the former two-message
                 # sequence and its artificial silence.  Body-height adjustment
@@ -602,7 +672,13 @@ class NavigationVrWebBridge(VrWebBridge):
                 self._speak_task(task_voice_text(
                     'arrived', task, self._showroom_single_task_active
                 ))
-                self._set_task_height_level(task['body_height_level'])
+                transit_error = getattr(self, '_task_transit_pose_error', '')
+                if transit_error:
+                    self._task_workflow.height_failed(transit_error)
+                elif self._task_height_target_m is None:
+                    # Recheck feedback at arrival, without restarting adjustment in flight.
+                    self._set_task_height(task['body_lowering_cm'], task.get('head_pitch_deg', 30),
+                                          reverse_squat=task.get('reverse_squat', False))
         elif outcome == 'failed':
             current = self._task_workflow.current()
             self._task_workflow.navigation_failed(
@@ -610,7 +686,8 @@ class NavigationVrWebBridge(VrWebBridge):
             )
 
     def _speak_task(self, text):
-        if not self._showroom_mode_enabled or not text or not rclpy.ok():
+        NavigationVrWebBridge._publish_voice_state(self)
+        if not getattr(self, '_voice_enabled', False) or not text or not rclpy.ok():
             return
         self._task_tts_publisher.publish(String(data=json.dumps({
             'status': 'play',
@@ -621,6 +698,19 @@ class NavigationVrWebBridge(VrWebBridge):
         self._showroom_mode_publisher.publish(
             Bool(data=bool(self._showroom_mode_enabled))
         )
+        self._publish_voice_state()
+
+    def _on_speech_health(self, message):
+        self._speech_health = self._status_payload(message)
+
+    def _publish_voice_state(self):
+        if not hasattr(self, '_voice_state_publisher'):
+            return
+        state = self._task_workflow.snapshot()['state']
+        self._voice_state_publisher.publish(String(data=json.dumps({
+            'enabled': self._voice_enabled, 'showroom': self._showroom_mode_enabled,
+            'task_active': state not in {'idle', 'completed', 'cancelled'},
+        })))
 
     def _reload_task_catalog_if_changed(self):
         """Refresh task capabilities before accepting a newly submitted plan.
@@ -633,7 +723,7 @@ class NavigationVrWebBridge(VrWebBridge):
         revision = (stat.st_mtime_ns, stat.st_size)
         if revision == self._task_catalog_revision:
             return False
-        catalog = json.loads(self._task_catalog_path.read_text(encoding='utf-8'))
+        catalog = load_catalog(self._task_catalog_path)
         workflow = TaskWorkflow(catalog)
         templates = task_chain_templates(catalog)
         showroom = catalog.get('showroom_mode', {})
@@ -655,20 +745,126 @@ class NavigationVrWebBridge(VrWebBridge):
         )
         return True
 
-    def _set_task_height_level(self, level):
+    def _refresh_idle_task_catalog(self):
+        if self._task_workflow.snapshot()['state'] not in {'idle', 'completed', 'cancelled', 'failed'}:
+            return
+        try:
+            self._reload_task_catalog_if_changed()
+            self._task_catalog_error = ''
+        except (OSError, TypeError, ValueError) as error:
+            self._task_catalog_error = str(error)
+
+    @staticmethod
+    def _task_measured_lowering(status, fresh, signed=False):
+        """Mapper status wraps controller feedback under backend, not at root."""
+        if not fresh or not isinstance(status, dict):
+            return None
+        backend = status.get('backend', status)
+        if not isinstance(backend, dict):
+            return None
+        height = backend.get('body_height', {})
+        if not isinstance(height, dict) or height.get('feedback_fresh') is not True:
+            return None
+        try:
+            measured = float(height.get('measured_signed_lowering_m', height['measured_lowering_m'])
+                             if signed else height['measured_lowering_m'])
+            feedback_age = time.monotonic() - float(height['feedback_time_monotonic'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        # Both nodes run on the robot; a fresh mapper packet must not make a
+        # cached, stopped controller appear to have fresh encoder feedback.
+        return measured if (math.isfinite(measured) and (-0.53 if signed else 0) <= measured <= 0.56
+                            and 0 <= feedback_age <= 0.5) else None
+
+    def _publish_task_head(self, enabled):
+        if getattr(self, '_task_head_pitch_deg', None) is None:
+            return
+        self._task_head_publisher.publish(String(data=json.dumps({
+            'enabled': bool(enabled), 'request_id': self._task_head_request_id,
+            'head_pitch_deg': self._task_head_pitch_deg,
+        })))
+        if not enabled:
+            self._task_head_pitch_deg = None
+
+    @staticmethod
+    def _task_head_ready(status, fresh, angle, request_id=None):
+        if angle is None:
+            return True
+        # Use the same encoder timestamp validation as body height, never a
+        # command/reference value or merely a fresh websocket packet.
+        if NavigationVrWebBridge._task_measured_lowering(status, fresh) is None:
+            return False
+        backend = status.get('backend', status)
+        try:
+            if request_id is not None:
+                goal = backend['task_head_goal']
+                if goal['request_id'] != request_id:
+                    return False
+                requested = float(goal['requested_deg'])
+                effective = float(goal['effective_deg'])
+                maximum = float(goal['safe_max_deg'])
+                if (not all(math.isfinite(v) for v in (requested, effective, maximum))
+                        or abs(requested-angle) > 1e-6
+                        or not 0 <= effective <= min(angle, maximum) + 1e-6):
+                    return False
+                angle = effective
+            pitch = float(backend['measured_neck_deg'][1])
+            return math.isfinite(pitch) and abs(pitch + angle) <= 1.0
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+
+    def _set_task_height(self, height_cm, head_angle=None, manual=False, reverse_squat=False):
+        target = lowering_cm(height_cm) / 100.0
+        if not isinstance(reverse_squat, bool) or (reverse_squat and target > 0.53):
+            raise ValueError('反方向下蹲最多53厘米')
+        if reverse_squat:
+            target = -target
+        angle = None if head_angle is None else head_pitch_deg(head_angle)
         with self._task_height_lock:
-            self._task_height_target_level = max(1, min(5, int(level)))
+            snapshot = self._task_workflow.snapshot()
+            if (self._exit_in_progress or (not manual
+                    and snapshot['state'] not in {'navigating', 'adjusting_height'})):
+                return
+            self._pose_is_manual = manual
+            self._task_pose_pause = None
+            self._task_head_wait_deadline = 0.0
+            with self._client_lock:
+                self._task_pose_owner = (snapshot['task_token'], self._control_session)
+            if manual:
+                self._manual_pose_status = {'state': 'adjusting', 'message': '正在调整高度和头部'}
+            self._task_height_target_m = target
+            self._task_head_pitch_deg = angle
+            self._task_head_request_id = str(time.monotonic_ns())
+            status, _age, fresh = self._teleop_status_snapshot()
+            current = NavigationVrWebBridge._task_measured_lowering(status, fresh, signed=True)
+            travel = abs(current - target) if current is not None else 1.09
+            # 283 encoder traces show ~0.025 m/s of physical lowering,
+            # despite the faster reference rate. Budget at 0.020 m/s plus
+            # settling time: 20 cm gets 13 s, not the old premature 7 s.
+            # This remains bounded (31 s for the full 56 cm), and actual
+            # feedback still decides completion; no timeout means success.
             self._task_height_deadline = (
-                time.monotonic() + self._task_height_timeout_seconds
+                time.monotonic() + max(self._task_height_timeout_seconds, travel / 0.02 + 3.0,
+                                       15.0 if angle is not None else 0.0)
             )
             self._task_height_stable_since = 0.0
+        # Send the first target in the arrival callback, not after speech.
+        self._task_height_tick()
 
     def _release_task_height_for_manual_control(self):
         """Hand task-height ownership to X/Y without stranding the mission."""
         with self._task_height_lock:
-            self._task_height_target_level = None
+            NavigationVrWebBridge._publish_task_head(self, False)
+            self._task_height_target_m = None
+            self._task_pose_pause = None
+            self._task_pose_owner = None
+            self._task_head_wait_deadline = 0.0
             self._task_height_deadline = 0.0
             self._task_height_stable_since = 0.0
+            if getattr(self, '_pose_is_manual', False):
+                self._pose_is_manual = False
+                self._manual_pose_status = {'state': 'cancelled', 'message': '已停止位置调整'}
+                return False
         task = self._task_workflow.height_adjusted()
         if task is not None:
             self.get_logger().info(
@@ -677,18 +873,126 @@ class NavigationVrWebBridge(VrWebBridge):
             )
         return task is not None
 
+    def _clear_task_pose_locked(self):
+        """Discard a preset without advancing or claiming its prerequisites."""
+        NavigationVrWebBridge._publish_task_head(self, False)
+        self._task_height_target_m = None
+        self._task_pose_pause = None
+        self._task_pose_owner = None
+        self._task_head_wait_deadline = 0.0
+        self._task_height_deadline = 0.0
+        self._task_height_stable_since = 0.0
+        self._body_height_publisher.publish(String(data='{"enabled":false,"direction":0.0}'))
+
     def _task_height_tick(self):
         with self._task_height_lock:
-            level = self._task_height_target_level
+            if self._task_height_target_m is None:
+                return
+            snapshot = self._task_workflow.snapshot()
+            if self._exit_in_progress:
+                NavigationVrWebBridge._clear_task_pose_locked(self)
+                return
+            if (self._task_height_target_m is not None and not getattr(self, '_pose_is_manual', False)
+                    and (snapshot['state'] not in {'navigating', 'adjusting_height'}
+                         or snapshot['task_token'] != self._task_pose_owner[0])):
+                NavigationVrWebBridge._clear_task_pose_locked(self)
+                return
+            level = self._task_height_target_m
             now = time.monotonic()
-            active = level is not None and now < self._task_height_deadline
+            if level is None:
+                return
+            status, _age, fresh = self._teleop_status_snapshot()
+            status = status if isinstance(status, dict) else {}
+            backend = status.get('backend', status)
+            backend = backend if isinstance(backend, dict) else {}
+            safety_reason = ''
+            if not getattr(self, '_pose_is_manual', False):
+                with self._client_lock:
+                    session_live = bool(
+                        self._control_peer is not None
+                        and self._control_session == self._task_pose_owner[1]
+                        and self._last_realtime_packet > 0.0
+                        and 0 <= now - self._last_realtime_packet <= float(
+                            self.get_parameter('vr_input_fresh_timeout').value))
+                if not session_live:
+                    safety_reason = 'vr_disconnected'
+                elif (not fresh or NavigationVrWebBridge._task_measured_lowering(
+                        status, fresh, signed=True) is None):
+                    safety_reason = 'feedback_stale'
+            if fresh:
+                for flag, reason in (('emergency_stop_latched', 'estop'),
+                                     ('quick_reset_active', 'reset'),
+                                     ('hardware_enable_pending', 'enabling')):
+                    if backend.get(flag):
+                        safety_reason = reason
+                        break
+                if not safety_reason and backend.get('hardware_enabled') is False:
+                    safety_reason = 'hardware_disabled'
+                if (not safety_reason and backend.get('task_head_cancelled_id') == self._task_head_request_id
+                        and backend.get('task_head_cancel_reason') in
+                        {'reset', 'enabling', 'estop', 'hardware_disabled', 'invalid_neck_limits'}):
+                    safety_reason = backend['task_head_cancel_reason']
+            paused = getattr(self, '_task_pose_pause', None)
+            if paused is not None:
+                with self._nav_lock:
+                    navigation_paused = str(self._navigation_status.get('state', '')).lower() == 'paused'
+                if not safety_reason and now >= self._task_head_wait_deadline:
+                    safety_reason = 'head_wait_timeout'
+                if safety_reason:
+                    self._task_head_pitch_deg = paused[0]
+                    self._task_pose_pause = None
+                elif (fresh and backend.get('head_follow_enabled') is False
+                      and backend.get('hardware_ready') is True
+                      and not navigation_paused and not self._navigation_paused_for_drive
+                      and not self._task_intervention
+                      and NavigationVrWebBridge._task_measured_lowering(status, fresh, signed=True) is not None):
+                    # A new id is required: the controller latches cancelled goals.
+                    self._task_head_pitch_deg = paused[0]
+                    self._task_head_request_id = str(time.monotonic_ns())
+                    self._task_height_deadline = max(self._task_height_deadline + now - paused[1], now + 15.0)
+                    self._task_pose_pause = None
+                    self.get_logger().info('task pose resumed after operator locked head')
+                else:
+                    return
+            # A takeover at the motion-deadline boundary is still recoverable.
+            active = (now < self._task_height_deadline or bool(safety_reason)
+                      or (fresh and backend.get('head_follow_enabled') is True
+                          and self._task_head_pitch_deg is not None))
             reached = False
+            head_cancelled = False
+            head_cancel_reason = ''
             if active:
-                status, _age, fresh = self._teleop_status_snapshot()
-                lowering = (status or {}).get('body_height', {}).get('lowering_m')
+                angle = getattr(self, '_task_head_pitch_deg', None)
+                head_cancelled = angle is not None and fresh and (
+                    backend.get('head_follow_enabled', False)
+                    or backend.get('task_head_cancelled_id') == self._task_head_request_id)
+                if head_cancelled:
+                    head_cancel_reason = ('head_tracking' if backend.get('head_follow_enabled', False)
+                                          else backend.get('task_head_cancel_reason', ''))
+                if safety_reason:
+                    head_cancelled = True
+                    head_cancel_reason = safety_reason
+                if (head_cancelled and head_cancel_reason in {'head_tracking', 'head_mode_changed'}
+                        and not getattr(self, '_pose_is_manual', False)):
+                    self._task_pose_pause = (angle, now, self._task_workflow.snapshot()['task_token'])
+                    if self._task_head_wait_deadline <= 0.0:
+                        self._task_head_wait_deadline = now + max(0.5, min(120.0, float(
+                            self.get_parameter('task_head_wait_timeout_seconds').value)))
+                    NavigationVrWebBridge._publish_task_head(self, False)
+                    self._body_height_publisher.publish(String(data='{"enabled":false,"direction":0.0}'))
+                    self._task_height_stable_since = 0.0
+                    self.get_logger().info('task pose paused for operator head control; navigation continues')
+                    return
+                if getattr(self, '_pose_is_manual', False) and (
+                        status.get('active_arms') or self._navigation_is_active()):
+                    head_cancelled = True
+                    head_cancel_reason = 'other_motion'
+                lowering = NavigationVrWebBridge._task_measured_lowering(status, fresh, signed=True)
                 try:
-                    target = 0.56 * (5 - level) / 4.0
-                    close = fresh and abs(float(lowering) - target) <= 0.008
+                    target = level
+                    close = not head_cancelled and fresh and abs(float(lowering) - target) <= 0.008
+                    close = close and NavigationVrWebBridge._task_head_ready(
+                        status, fresh, angle, getattr(self, '_task_head_request_id', None))
                 except (TypeError, ValueError):
                     close = False
                 if close:
@@ -700,26 +1004,75 @@ class NavigationVrWebBridge(VrWebBridge):
                     )
                 else:
                     self._task_height_stable_since = 0.0
+                if head_cancelled:
+                    active = False
             if level is not None and (not active or reached):
-                self._task_height_target_level = None
+                self._task_height_target_m = None
                 active = False
             timed_out = level is not None and not active and not reached
-        if not rclpy.ok() or level is None:
-            return
-        payload = (
-            {'enabled': True, 'direction': 0.0, 'target_level': level}
-            if active else {'enabled': False, 'direction': 0.0}
-        )
-        self._body_height_publisher.publish(String(data=json.dumps(
-            payload, separators=(',', ':')
-        )))
-        if timed_out:
-            # Height adjustment is an operator-assistance step, not a reason to
-            # strand the whole mission.  Continue into the action stage when
-            # feedback is unavailable or the target is not reached in time.
-            self._task_workflow.height_adjusted()
-        elif not active:
-            self._task_workflow.height_adjusted()
+            if not rclpy.ok() or level is None:
+                return
+            payload = (
+                {'enabled': True, 'direction': 0.0, 'target_lowering_m': abs(level),
+                 **({'reverse_squat': True} if level < 0 else {})}
+                if active else {'enabled': False, 'direction': 0.0}
+            )
+            self._body_height_publisher.publish(String(data=json.dumps(
+                payload, separators=(',', ':')
+            )))
+            head_angle = getattr(self, '_task_head_pitch_deg', None)
+            NavigationVrWebBridge._publish_task_head(self, active)
+            if not active:
+                self._task_pose_pause = None
+                self._task_pose_owner = None
+                self._task_head_wait_deadline = 0.0
+                self._task_height_deadline = 0.0
+                self._task_height_stable_since = 0.0
+            if timed_out:
+                # Never claim the requested height was reached on a timeout.
+                status, _age, fresh = self._teleop_status_snapshot()
+                measured = NavigationVrWebBridge._task_measured_lowering(status, fresh, signed=True)
+                actual = '反馈过期/不可用' if measured is None else f"实测{'反向' if measured < 0 else ''}下降{abs(measured) * 100:.1f}cm"
+                if head_cancelled:
+                    details = {
+                        'head_tracking': '头部跟随已开启，请锁定头部后重试',
+                        'head_mode_changed': '已手动切换头部控制，请锁定头部后重试',
+                        'reset': '正在执行复位，请复位完成后重试',
+                        'enabling': '使能尚未完成，请完成使能后重试',
+                        'estop': '急停已触发，请检查现场和机器人状态',
+                        'hardware_disabled': '机器人未使能，请检查使能状态',
+                        'invalid_neck_limits': '颈部限位配置无效，请检查模型配置',
+                        'stopped': '当前调头请求已被停止，请检查后重试',
+                        'other_motion': '已开始手臂跟随或导航，手动位置调整已停止',
+                        'head_wait_timeout': '等待头部控制权释放超时，待执行姿态已清除；请检查后重试',
+                        'vr_disconnected': 'VR连接已断开或输入过期，待执行姿态已清除；请重新确认任务',
+                        'feedback_stale': '关节或控制反馈过期，待执行姿态已清除；请检查后重试',
+                    }
+                    message = '任务姿态调整已停止：' + details.get(head_cancel_reason, '头部控制状态发生变化，请检查后重试')
+                elif head_angle is not None and not NavigationVrWebBridge._task_head_ready(
+                        status, fresh, head_angle, self._task_head_request_id):
+                    message = f'头部未到位：目标俯视{head_angle:g}°；请检查使能、头部锁定及关节反馈后重试'
+                else:
+                    message = f"高度未到位：目标{'反向' if level < 0 else ''}下降{abs(level) * 100:g}cm，{actual}；请检查后重试"
+                self.get_logger().warning(
+                    f'task pose stopped: request={self._task_head_request_id}, '
+                    f'task={self._task_workflow.snapshot().get("task_token", "")}, '
+                    f'reason={head_cancel_reason or "timeout"}, detail={message}'
+                )
+                if getattr(self, '_pose_is_manual', False):
+                    self._manual_pose_status = {'state': 'failed', 'message': message}
+                    self._pose_is_manual = False
+                else:
+                    if self._task_workflow.snapshot()['state'] == 'navigating':
+                        self._task_transit_pose_error = message
+                    else:
+                        self._task_workflow.height_failed(message)
+            elif not active:
+                if getattr(self, '_pose_is_manual', False):
+                    self._manual_pose_status = {'state': 'ready', 'message': '高度和头部已到位'}
+                    self._pose_is_manual = False
+                else:
+                    self._task_workflow.height_adjusted()
 
     def _on_relocalization_status(self, message):
         payload = self._status_payload(message)
@@ -805,7 +1158,11 @@ class NavigationVrWebBridge(VrWebBridge):
         }
 
     def _set_drive_sample(self, payload):
+        if self._exit_in_progress:
+            return
         deadman = bool(payload.get('deadman', False))
+        if getattr(self, '_task_intervention', False):
+            deadman = False
         sample = {
             'deadman': deadman,
             'forward': shaped_axis(payload.get('forward', 0.0)),
@@ -818,6 +1175,7 @@ class NavigationVrWebBridge(VrWebBridge):
             self._drive_sample = sample
             self._drive_time = now
             if deadman and not was_deadman:
+                self._drive_session_generation = getattr(self, '_drive_session_generation', 0) + 1
                 settle = (
                     float(self.get_parameter('drive_takeover_settle_seconds').value)
                     if self._navigation_is_active()
@@ -840,17 +1198,38 @@ class NavigationVrWebBridge(VrWebBridge):
             # ``adjusting_height``, which hides the hold-A completion prompt.
             self._release_task_height_for_manual_control()
         if rclpy.ok():
+            # Only deliberate X/Y input may supersede the automatic height
+            # target. Idle chassis packets used to cancel it every VR frame.
+            with self._task_height_lock:
+                if self._task_height_target_m is not None:
+                    return
             self._body_height_publisher.publish(String(data=json.dumps({
                 'enabled': height_enabled,
                 'direction': height_direction,
             }, separators=(',', ':'))))
+
+    @staticmethod
+    def _gripper_vendor_force(ratio):
+        # The vendor interface normally accepts the full 0..10 A range
+        # (the published normalized value is multiplied by 10 A).  Hardware
+        # testing showed little useful feel difference once the cap reaches
+        # roughly 0.4 A for the current scenarios, so expose only four fixed
+        # levels: off, low, standard, and the original 10 A high ceiling.
+        return {
+            0.0: 0.0,
+            0.25: 0.025,
+            0.35: 0.035,
+            1.0: 1.0,
+        }[ratio]
 
     def _set_gripper_force_ratio(self, payload):
         ratio = float(payload.get('ratio'))
         minimum = float(self.get_parameter('gripper_force_minimum_ratio').value)
         if not math.isfinite(ratio) or ratio < minimum or ratio > 1.0:
             raise ValueError(f'gripper force ratio must be within [{minimum}, 1.0]')
-        ratio = round(ratio * 10.0) / 10.0
+        ratio = round(ratio, 2)
+        if ratio not in (0.0, 0.25, 0.35, 1.0):
+            raise ValueError('gripper force must be one of: 0%, low, standard, high')
         if (
             self._left_gripper_force_publisher.get_subscription_count() < 1
             or self._right_gripper_force_publisher.get_subscription_count() < 1
@@ -860,37 +1239,31 @@ class NavigationVrWebBridge(VrWebBridge):
         # normalized value by the configured 10 A gripper-current ceiling.
         # The old ``ratio`` key was silently replaced by the vendor default
         # 0.5, which made every menu setting apply the same 5 A limit.
-        message = String(data=json.dumps({'force': ratio}, separators=(',', ':')))
+        vendor_force = self._gripper_vendor_force(ratio)
+        message = String(data=json.dumps({'force': vendor_force}, separators=(',', ':')))
         self._left_gripper_force_publisher.publish(message)
         self._right_gripper_force_publisher.publish(message)
         self._gripper_force_ratio = ratio
         return ratio
 
-    async def _api_gripper_force(self, request):
-        """Apply gripper force through a request/response path.
-
-        The VR menu used to send this setting only through the optional
-        navigation WebSocket.  When that socket was reconnecting the local UI
-        still changed, although no ROS command reached either gripper.  Keep
-        the WebSocket handler for cached clients, but give current clients an
-        independently acknowledged control path.
-        """
+    async def _api_gripper_width(self, request):
         try:
-            ratio = self._set_gripper_force_ratio(await request.json())
-            return web.json_response({
-                'success': True,
-                'ratio': ratio,
-                'current_limit': round(
-                    ratio * float(
-                        self.get_parameter('gripper_force_maximum_current').value
-                    ), 2
-                ),
-                'message': f'夹爪力度已应用：{round(ratio * 100):d}%',
-            })
-        except (RuntimeError, TypeError, ValueError) as error:
-            return web.json_response(
-                {'success': False, 'message': str(error)}, status=400
-            )
+            width = checked_width((await request.json()).get('width_cm'))
+            if not self._gripper_width_client.service_is_ready():
+                raise RuntimeError('夹爪映射服务未就绪，宽度未更改')
+            command = SetParametersAtomically.Request(parameters=[
+                Parameter('gripper_closed_width_cm', value=width).to_parameter_msg(),
+            ])
+            response = await self._await_service_response(self._gripper_width_client, command, 3.0)
+            if not response.result.successful:
+                raise RuntimeError(response.result.reason)
+            return web.json_response({'success': True, 'width_cm': width})
+        except (ValueError, TypeError, RuntimeError, TimeoutError, OSError) as error:
+            return web.json_response({'success': False, 'message': str(error)}, status=400)
+
+    async def _api_gripper_force(self, request):
+        # Old cached pages must not silently keep changing motor current.
+        return web.json_response({'success': False, 'message': '菜单已改为闭合宽度，请刷新VR页面'}, status=410)
 
     def _publish_stop(self):
         self._drive_current = [0.0, 0.0, 0.0]
@@ -904,11 +1277,14 @@ class NavigationVrWebBridge(VrWebBridge):
         return current + max(-maximum_step, min(maximum_step, target - current))
 
     def _pause_for_drive(self):
-        if self._pause_requested_for_drive:
+        if self._exit_in_progress or self._pause_requested_for_drive:
+            return
+        if time.monotonic() < getattr(self, '_drive_pause_retry_at', 0.0):
             return
         if not self._pause_navigation_client.service_is_ready():
             return
         self._pause_requested_for_drive = True
+        generation = self._drive_session_generation
         future = self._pause_navigation_client.call_async(Trigger.Request())
 
         def complete(done):
@@ -919,53 +1295,80 @@ class NavigationVrWebBridge(VrWebBridge):
             except Exception as error:
                 self.get_logger().warning(f'Navigation pause for manual drive failed: {error}')
             with self._drive_lock:
+                if generation != self._drive_session_generation:
+                    return
                 self._navigation_paused_for_drive = success
-                if not success:
+                if not success and self._navigation_is_active():
                     self._pause_requested_for_drive = False
+                    self._drive_pause_retry_at = time.monotonic() + .5
             if success:
                 self.get_logger().info('Navigation paused for manual base takeover')
 
         future.add_done_callback(complete)
 
-    def _resume_after_drive(self, now):
-        with self._drive_lock:
-            paused = self._navigation_paused_for_drive
-            pending = self._resume_requested_for_drive
-            retry_at = self._drive_resume_retry_at
-        if not paused or pending or now < retry_at:
-            return
-        if not self._resume_navigation_client.service_is_ready():
-            return
-        with self._drive_lock:
+    async def _operator_payload(self, request):
+        payload = await request.json()
+        with self._client_lock:
+            if (self._exit_in_progress or self._control_peer is None
+                    or request.remote != self._control_peer
+                    or payload.get('client_id') != self._control_client_id):
+                raise RuntimeError('请由当前接管的头显操作')
+        return payload
+
+    def _drive_link_alive(self):
+        return any(sock is not None and not sock.closed
+                   for sock in (self._drive_websocket, self._navigation_websocket))
+
+    async def _wait_navigation_stop(self, generation):
+        deadline = time.monotonic() + 5.0
+        message = '等待导航停止'
+        while time.monotonic() < deadline:
+            if (self._exit_in_progress or generation != self._drive_session_generation
+                    or not self._drive_link_alive()):
+                raise RuntimeError('接管状态或连接已改变，已取消操作')
+            ready, message = await self._call_service(self._stop_ready_client, Trigger.Request(), timeout=1.0)
+            if generation != self._drive_session_generation or not self._drive_link_alive():
+                raise RuntimeError('连接或接管状态已改变，已取消操作')
+            if ready:
+                return
+            await asyncio.sleep(.1)
+        raise RuntimeError(message)
+
+    async def _api_release_drive(self, request):
+        try:
+            await self._operator_payload(request)
+            if self._task_intervention or self._resume_requested_for_drive:
+                raise RuntimeError('任务操作正在处理中')
             self._resume_requested_for_drive = True
-        future = self._resume_navigation_client.call_async(Trigger.Request())
-
-        def complete(done):
-            success = False
-            message = ''
-            try:
-                result = done.result()
-                success = bool(result and result.success)
-                message = str(result.message if result else '')
-            except Exception as error:
-                message = str(error)
-            with self._drive_lock:
+            owns_resume = True
+            generation = self._drive_session_generation
+            self._set_drive_sample({'deadman': False})
+            self._publish_stop()
+            self._publish_manual_override(False)
+            await self._wait_navigation_stop(generation)
+            if not self._navigation_paused_for_drive:
+                return web.json_response({'success': True, 'message': '底盘接管已退出，无待恢复导航'})
+            with self._nav_lock:
+                destination = str(self._navigation_status.get('active_waypoint', ''))
+            success, message = await self._call_service(self._resume_navigation_client, Trigger.Request())
+            if not success:
+                raise RuntimeError(message)
+            self._navigation_paused_for_drive = False
+            self._pause_requested_for_drive = False
+            self._task_workflow.navigation_resumed(destination)
+            return web.json_response({'success': True, 'message': '已退出底盘接管，继续前往原航点'})
+        except (RuntimeError, ValueError) as error:
+            return web.json_response({'success': False, 'message': str(error)}, status=409)
+        finally:
+            if 'owns_resume' in locals():
                 self._resume_requested_for_drive = False
-                if success:
-                    self._navigation_paused_for_drive = False
-                    self._pause_requested_for_drive = False
-                else:
-                    self._drive_resume_retry_at = time.monotonic() + 0.5
-            if success:
-                self.get_logger().info('Navigation resumed after manual base takeover')
-            else:
-                self.get_logger().warning(
-                    f'Navigation resume after manual drive failed: {message}'
-                )
-
-        future.add_done_callback(complete)
 
     def _drive_tick(self):
+        if self._exit_in_progress or self._control_peer is None:
+            if self._drive_was_active or any(abs(value) > 1e-6 for value in self._drive_current):
+                self._publish_stop()
+            self._drive_was_active = False
+            return
         now = time.monotonic()
         dt = max(0.001, min(0.05, now - self._last_drive_tick))
         self._last_drive_tick = now
@@ -980,15 +1383,25 @@ class NavigationVrWebBridge(VrWebBridge):
             and sample_age <= float(self.get_parameter('drive_watchdog_seconds').value)
         )
         if not active:
+            if self._drive_was_active and self._navigation_is_active() and not self._navigation_paused_for_drive:
+                # Lost input cannot give an unpaused old action control back.
+                self._publish_manual_override(True)
+                self._publish_stop()
+                self._pause_for_drive()
+                return
             if self._drive_was_active or any(abs(value) > 1e-6 for value in self._drive_current):
                 self._publish_stop()
             self._publish_manual_override(False)
             self._drive_was_active = False
-            self._resume_after_drive(now)
             return
 
         # Claim arbitration before publishing the first non-zero velocity.
         self._publish_manual_override(True)
+        self._pause_for_drive()
+        if self._navigation_is_active() and not self._navigation_paused_for_drive:
+            self._publish_stop()
+            self._drive_was_active = True
+            return  # Never leave an unpaused autonomous action behind a takeover.
 
         if now < settle_until:
             self._pause_for_drive()
@@ -1012,7 +1425,81 @@ class NavigationVrWebBridge(VrWebBridge):
         self._drive_publisher.publish(command)
         self._drive_was_active = True
 
+    async def _websocket_handler(self, request):
+        if self._exit_in_progress:
+            raise web.HTTPConflict(text='VR session is stopping safely; retry shortly')
+        return await super()._websocket_handler(request)
+
+    async def _api_exit_vr(self, request):
+        payload = await request.json()
+        with self._client_lock:
+            owns_session = (self._control_peer == request.remote
+                            and self._control_client_id == payload.get('client_id'))
+        if not owns_session:
+            raise web.HTTPConflict(text='Only the active headset can exit this session')
+        if self._exit_in_progress:
+            raise web.HTTPConflict(text='VR exit is already in progress')
+        self._exit_in_progress = True
+        self._voice_enabled = False
+        self._publish_voice_state()
+        try:
+            self._task_workflow.cancel('VR会话已退出')
+            self._release_task_height_for_manual_control()
+            self._body_height_publisher.publish(String(data='{"enabled":false,"direction":0.0}'))
+            self._showroom_single_task_active = False
+            with self._drive_lock:
+                self._drive_session_generation += 1
+                self._drive_sample = None
+                self._navigation_paused_for_drive = False
+                self._pause_requested_for_drive = False
+                self._resume_requested_for_drive = False
+            self._publish_stop()
+            navigation_error = None
+            if self._navigation_is_active() or self._cancel_navigation_client.service_is_ready():
+                success, message = await self._call_service(self._cancel_navigation_client, Trigger.Request())
+                if not success and self._navigation_is_active():
+                    navigation_error = message
+            success, message = await self._call_service(self._hardware_client, SetBool.Request(data=False), timeout=6.0)
+            if not success or navigation_error:
+                return web.json_response({'success': False, 'message': navigation_error or message}, status=409)
+            # Keep ownership reserved while every old data transport closes.
+            for socket in (self._navigation_websocket, self._drive_websocket,
+                           self._precision_cloud_websocket):
+                if socket is not None and not socket.closed:
+                    await socket.close(code=1000, message=b'explicit VR exit')
+            await self._close_camera_webrtc_peer()
+            await self._close_webrtc_peer()
+            socket = self._control_websocket
+            if socket is not None and not socket.closed:
+                await socket.close(code=1000, message=b'explicit VR exit')
+            with self._client_lock:
+                self._connected_clients = 0
+                self._control_peer = None
+                self._control_client_id = None
+                self._control_websocket = None
+                self._control_session = 0
+            self._clear_packet_buffer()
+            self._publish_stop()
+            self._publish_manual_override(False)
+            return web.json_response({'success': True, 'message': '已停止任务并释放VR接管'})
+        finally:
+            self._exit_in_progress = False
+
+    async def _api_hardware_control(self, request):
+        payload = await request.json()
+        if self._exit_in_progress:
+            raise web.HTTPConflict(text='VR session is stopping safely')
+        if isinstance(payload, dict) and payload.get('enabled') is True:
+            with self._client_lock:
+                owns_session = (self._control_peer == request.remote
+                                and self._control_client_id == payload.get('client_id'))
+            if not owns_session:
+                return web.json_response({'success': False, 'message': '当前网页尚未取得VR数据连接，请等待连接后再使能'}, status=409)
+        return await super()._api_hardware_control(request)
+
     async def _navigation_websocket_handler(self, request):
+        if self._exit_in_progress:
+            raise web.HTTPConflict(text='VR session is stopping')
         peer = request.remote or 'unknown'
         with self._client_lock:
             if self._control_peer is not None and self._control_peer != peer:
@@ -1043,11 +1530,8 @@ class NavigationVrWebBridge(VrWebBridge):
                     elif isinstance(payload, dict) and payload.get('type') == 'monitor_view':
                         self._update_monitor_view(payload.get('view'))
                     elif isinstance(payload, dict) and payload.get('type') == 'gripper_force':
-                        ratio = self._set_gripper_force_ratio(payload)
-                        await websocket.send_str(json.dumps({
-                            'type': 'gripper_force_state',
-                            'ratio': ratio,
-                        }, separators=(',', ':')))
+                        # Deprecated cached client: never change force here.
+                        continue
                 except (TypeError, ValueError):
                     continue
         finally:
@@ -1056,10 +1540,13 @@ class NavigationVrWebBridge(VrWebBridge):
             if self._navigation_websocket is websocket:
                 self._navigation_websocket = None
                 if self._drive_websocket is None or self._drive_websocket.closed:
+                    self._drive_session_generation += 1
                     self._set_drive_sample({'deadman': False})
         return websocket
 
     async def _drive_websocket_handler(self, request):
+        if self._exit_in_progress:
+            raise web.HTTPConflict(text='VR session is stopping')
         peer = request.remote or 'unknown'
         with self._client_lock:
             if self._control_peer is not None and self._control_peer != peer:
@@ -1088,6 +1575,7 @@ class NavigationVrWebBridge(VrWebBridge):
         finally:
             if self._drive_websocket is websocket:
                 self._drive_websocket = None
+                self._drive_session_generation += 1
                 self._set_drive_sample({'deadman': False})
         return websocket
 
@@ -1423,6 +1911,7 @@ class NavigationVrWebBridge(VrWebBridge):
 
     async def _api_navigation_state(self, request):
         del request
+        self._refresh_idle_task_catalog()
         with self._nav_lock:
             map_meta = dict(self._map_meta) if self._map_meta else None
             pose = dict(self._pose) if self._pose else None
@@ -1445,8 +1934,27 @@ class NavigationVrWebBridge(VrWebBridge):
                 'maps': self._map_catalog(),
             }
         payload['task_dispatch'] = self._task_workflow.snapshot()
+        payload['task_pose_waiting_for_head_lock'] = getattr(self, '_task_pose_pause', None) is not None
         payload['task_templates'] = self._task_templates
+        payload['task_catalog_error'] = self._task_catalog_error
         payload['showroom_mode_enabled'] = self._showroom_mode_enabled
+        payload['voice_enabled'] = self._voice_enabled
+        payload['speech_health'] = self._speech_health
+        status, _age, fresh = self._teleop_status_snapshot()
+        status = status if isinstance(status, dict) else {}
+        measured = self._task_measured_lowering(status, fresh)
+        backend = status.get('backend') or {}
+        try:
+            pitch = -float(backend['measured_neck_deg'][1])
+            pitch = round(pitch, 1) if measured is not None and math.isfinite(pitch) else None
+        except (KeyError, IndexError, TypeError, ValueError):
+            pitch = None
+        payload['body_pose'] = {
+            'lowering_cm': None if measured is None else round(measured * 100, 1),
+            'head_pitch_deg': pitch,
+            'preset': dict(self._manual_pose_status),
+        }
+        payload['delivery_handoff'] = self._delivery_state_payload()
         payload['services'] = {
             'waypoints': self._list_waypoints_client.service_is_ready(),
             'navigate': self._navigate_waypoint_client.service_is_ready(),
@@ -1466,6 +1974,10 @@ class NavigationVrWebBridge(VrWebBridge):
         if task is None:
             raise RuntimeError('没有当前任务')
         self._task_workflow.navigation_started()
+        self._task_transit_pose_error = ''
+        task_token = self._task_workflow.snapshot()['task_token']
+        # Preserve the operator's B-key mode. The existing pose tick waits for
+        # head ownership; navigation does not require forcing HMD tracking off.
         self._speak_task(task_voice_text(
             'departure', task, self._showroom_single_task_active
         ))
@@ -1496,6 +2008,11 @@ class NavigationVrWebBridge(VrWebBridge):
             else:
                 self._task_workflow.navigation_failed(message)
             raise RuntimeError(message)
+        snapshot = self._task_workflow.snapshot()
+        if (not self._exit_in_progress and snapshot['task_token'] == task_token
+                and snapshot['state'] == 'navigating'):
+            self._set_task_height(task['body_lowering_cm'], task.get('head_pitch_deg', 30),
+                                  reverse_squat=task.get('reverse_squat', False))
         return message
 
     async def _api_tasks_submit(self, request):
@@ -1542,8 +2059,105 @@ class NavigationVrWebBridge(VrWebBridge):
             await self._call_service(self._pause_navigation_client, Trigger.Request())
         self._task_workflow.cancel('已由新的本地任务流程替换')
 
+    async def _api_task_menu_catalog(self, request):
+        try:
+            return web.json_response({'success': True, **task_menu_catalog(self._task_catalog_path)})
+        except (OSError, ValueError, TypeError) as error:
+            return web.json_response({'success': False, 'message': str(error)}, status=422)
+
+    async def _api_custom_task_start(self, request):
+        try:
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ValueError('任务请求格式错误')
+            with self._client_lock:
+                if (self._control_peer is None or self._control_peer != request.remote
+                        or self._control_client_id != payload.get('client_id')):
+                    raise RuntimeError('请由当前已使能的头显确认任务')
+            status, _age, fresh = self._teleop_status_snapshot()
+            status = status if isinstance(status, dict) else {}
+            if self._exit_in_progress or not fresh or not (status.get('backend') or {}).get('hardware_ready'):
+                raise RuntimeError('请先完成VR使能')
+            if self._task_workflow.snapshot()['state'] not in {'idle','completed','cancelled','failed'}:
+                raise RuntimeError('请先完成或退出当前任务串')
+            if self._task_height_target_m is not None:
+                raise RuntimeError('请等待姿态调整完成')
+            self._refresh_idle_task_catalog()
+            if self._task_catalog_error: raise ValueError(self._task_catalog_error)
+            tasks = compose_menu_tasks(task_menu_catalog(self._task_catalog_path), payload)
+            with self._nav_lock:
+                missing = sorted({t['location'] for t in tasks} - set(self._waypoints))
+            if missing: raise ValueError('地图缺少航点：'+'、'.join(missing))
+            self._task_workflow.submit('VR自定义任务流程', tasks)
+            self._showroom_single_task_active = False
+            return await self._api_tasks_confirm(None)
+        except (OSError, ValueError, TypeError) as error:
+            return web.json_response({'success':False,'message':str(error)},status=422)
+        except RuntimeError as error:
+            return web.json_response({'success':False,'message':str(error)},status=409)
+
+    async def _api_pose_preset(self, request):
+        try:
+            payload = await request.json()
+            height, head = pose_values(payload)
+            with self._client_lock:
+                if (self._control_peer is None or self._control_peer != request.remote
+                        or self._control_client_id != payload.get('client_id')):
+                    raise RuntimeError('只能由当前已使能的头显设置位置')
+            status, _age, fresh = self._teleop_status_snapshot()
+            status = status if isinstance(status, dict) else {}
+            backend = status.get('backend') or {}
+            if self._exit_in_progress or not fresh or not backend.get('hardware_ready'):
+                raise RuntimeError('请先完成VR使能，并确认关节反馈正常')
+            if backend.get('head_follow_enabled'):
+                raise RuntimeError('请先按B锁定头部，再应用位置')
+            if status.get('active_arms'):
+                raise RuntimeError('请先松开腰键，停止手臂跟随')
+            if self._navigation_is_active():
+                raise RuntimeError('请先停止导航，再调整位置')
+            with self._drive_lock:
+                if self._drive_sample and self._drive_sample.get('deadman'):
+                    raise RuntimeError('请先取消底盘接管，再应用位置；X/Y手动升降仍可使用')
+            if self._task_height_target_m is not None:
+                raise RuntimeError('正在调整位置，请等待完成或停止后再设置')
+            self._set_task_height(height, head, manual=True)
+            return web.json_response({'success':True,'message':'开始调整；可在菜单中停止'})
+        except (KeyError, ValueError, TypeError) as error:
+            return web.json_response({'success':False,'message':str(error)},status=422)
+        except RuntimeError as error:
+            return web.json_response({'success':False,'message':str(error)},status=409)
+
+    async def _api_pose_stop(self, request):
+        if self._pose_is_manual:
+            self._release_task_height_for_manual_control()
+            self._body_height_publisher.publish(String(data='{"enabled":false,"direction":0}'))
+        return web.json_response({'success':True,'message':'位置调整已停止'})
+
+    async def _api_voice_enabled(self, request):
+        payload = await request.json()
+        if not isinstance(payload, dict) or not isinstance(payload.get('enabled'), bool):
+            return web.json_response({'success':False,'message':'语音开关格式错误'},status=422)
+        self._voice_enabled = payload['enabled']
+        self._publish_voice_state()
+        return web.json_response({'success':True,'enabled':self._voice_enabled,
+            'message':'语音播报已开启，正在准备引擎' if self._voice_enabled else '语音播报已关闭'})
+
+    @staticmethod
+    def _template_start_index(payload, task_count):
+        """Optional 0-based starting task; validate before replacing a workflow."""
+        raw = payload.get('start_index', 0)
+        if raw is None or raw == '':
+            raw = 0
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise ValueError('起始任务序号无效')
+        if not 0 <= raw < task_count:
+            raise ValueError('起始任务序号超出流程范围，请重新选择流程')
+        return raw
+
     async def _api_tasks_template_start(self, request):
         try:
+            self._refresh_idle_task_catalog()
+            if self._task_catalog_error: raise ValueError(self._task_catalog_error)
             payload = await request.json()
             identifier = str(payload.get('id', '')).strip()
             template = next(
@@ -1551,12 +2165,20 @@ class NavigationVrWebBridge(VrWebBridge):
             )
             if template is None:
                 raise ValueError('请选择有效的预设任务流程')
+            tasks = list(template['tasks'])
+            start_index = self._template_start_index(payload, len(tasks))
+            selected_tasks = tasks[start_index:]
             await self._replace_active_task()
             self._task_workflow.submit(
-                f"VR预设流程：{template['name']}", template['tasks']
+                f"VR预设流程：{template['name']}", selected_tasks
             )
             self._showroom_single_task_active = False
-            self._speak_task(f"已启动{template['name']}，共{template['task_count']}项任务。")
+            if start_index:
+                self._speak_task(
+                    f"收到，从{selected_tasks[0]['location']}的"
+                    f"{selected_tasks[0]['task']}开始，这就出发。")
+            else:
+                self._speak_task(f"收到，{template['name']}，这就出发。")
             return await self._api_tasks_confirm(None)
         except ValueError as error:
             return web.json_response({'success': False, 'message': str(error)}, status=422)
@@ -1579,7 +2201,7 @@ class NavigationVrWebBridge(VrWebBridge):
                 [{
                     'location': name,
                     'task': self._showroom_waypoint_task,
-                    'body_height_level': self._showroom_height_level,
+                    'body_lowering_cm': 0.0, 'automatic': False,
                 }],
                 allow_unlisted=True,
             )
@@ -1652,7 +2274,7 @@ class NavigationVrWebBridge(VrWebBridge):
                 await self._start_current_task_navigation()
             else:
                 if not showroom_single:
-                    self._speak_task('全部任务已完成。')
+                    self._speak_task('本轮任务完成，收工啦。')
                 self._showroom_single_task_active = False
             return web.json_response({
                 'success': True,
@@ -1689,33 +2311,140 @@ class NavigationVrWebBridge(VrWebBridge):
         except (RuntimeError, ValueError) as error:
             return web.json_response({'success': False, 'message': str(error)}, status=409)
 
-    async def _api_tasks_skip_navigation_failure(self, request):
-        del request
+    async def _api_tasks_retry_pose(self, request):
         try:
-            result, skipped, upcoming = self._task_workflow.skip_navigation_failure()
-            if result == 'next':
-                await asyncio.sleep(0.25)
-                await self._start_current_task_navigation()
+            payload = await self._operator_payload(request)
+            snapshot = self._task_workflow.snapshot()
+            if (snapshot['state'] != 'failed' or not snapshot['current']
+                    or payload.get('task_token') != snapshot['task_token']):
+                raise RuntimeError('当前任务已改变，请重新确认姿态重试')
+            if self._task_intervention or self._resume_requested_for_drive:
+                raise RuntimeError('上一项任务操作仍在处理')
+            self._task_intervention = True
+            owns_intervention = True
+            generation = self._drive_session_generation
+            if self._navigation_is_active():
+                raise RuntimeError('请先停止导航，再重试任务姿态')
+            await self._wait_navigation_stop(generation)
+            # The operator, task and motion state can change while awaiting stop.
+            await self._operator_payload(request)
+            if self._exit_in_progress or generation != self._drive_session_generation:
+                raise RuntimeError('接管状态已改变，已取消姿态重试')
+            status, _age, fresh = self._teleop_status_snapshot()
+            status = status if isinstance(status, dict) else {}
+            backend = status.get('backend') or {}
+            if (not fresh or not backend.get('hardware_ready')
+                    or self._task_measured_lowering(status, fresh) is None):
+                raise RuntimeError('请先完成VR使能，并确认关节反馈正常')
+            if backend.get('head_follow_enabled') is not False:
+                raise RuntimeError('请先短按B锁定头部，再长按A重试姿态')
+            if status.get('active_arms'):
+                raise RuntimeError('请先松开腰键，停止手臂跟随，再重试姿态')
+            if self._navigation_is_active():
+                raise RuntimeError('请先停止导航，再重试任务姿态')
+            with self._drive_lock:
+                if self._drive_sample and self._drive_sample.get('deadman'):
+                    raise RuntimeError('请先退出底盘接管，再重试任务姿态')
+            if self._task_height_target_m is not None:
+                raise RuntimeError('已有位置调整正在进行，请等待完成或停止后再重试')
+            current = self._task_workflow.retry_height_failure(payload['task_token'])
+            self._task_transit_pose_error = ''
+            self._set_task_height(current['body_lowering_cm'], current.get('head_pitch_deg', 30),
+                                  reverse_squat=current.get('reverse_squat', False))
+            self.get_logger().info(f'task pose retry: task={payload["task_token"]}')
+            return web.json_response({'success': True, 'message': '正在重试当前任务姿态，后续流程保留',
+                                      'task_dispatch': self._task_workflow.snapshot()})
+        except (RuntimeError, ValueError) as error:
+            if ('current' in locals()
+                    and self._task_workflow.snapshot()['task_token'] == payload['task_token']):
+                self._task_workflow.height_failed(str(error))
+            return web.json_response({'success': False, 'message': str(error)}, status=409)
+        finally:
+            if 'owns_intervention' in locals():
+                self._task_intervention = False
+
+    async def _api_tasks_skip_navigation_failure(self, request):
+        # Old cached pages mapped long B directly to skip. Never retain that trap.
+        del request
+        return web.json_response({'success': False, 'message': '跳过任务已移至菜单，请刷新VR网页'}, status=409)
+
+    async def _api_task_intervention(self, request, skip=False):
+        try:
+            payload = await self._operator_payload(request)
+            snapshot = self._task_workflow.snapshot()
+            allowed = {'navigating','navigation_failed'}
+            if skip:
+                allowed.update({'adjusting_height','awaiting_action','failed'})
+            if (snapshot['state'] not in allowed or not snapshot['current']
+                    or payload.get('task_token') != snapshot['task_token']):
+                raise RuntimeError('当前任务已改变，请重新确认')
+            if skip and payload.get('confirmed') is not True:
+                raise RuntimeError('跳过任务需要二次确认')
+            if self._task_intervention or self._resume_requested_for_drive:
+                raise RuntimeError('上一项任务操作仍在处理')
+            self._task_intervention = True
+            self._drive_session_generation += 1
+            generation = self._drive_session_generation
+            self._navigation_paused_for_drive = False
+            self._pause_requested_for_drive = False
+            self._set_drive_sample({'deadman': False})
+            self._publish_stop()
+            self._publish_manual_override(False)
+            if snapshot['state'] in {'navigating','navigation_failed'} or self._navigation_is_active():
+                ok, message = await self._call_service(self._pause_navigation_client, Trigger.Request())
+                if not ok:
+                    raise RuntimeError(message)
+            await self._wait_navigation_stop(generation)
+            latest = self._task_workflow.snapshot()
+            if latest['task_token'] != snapshot['task_token'] or latest['state'] not in allowed:
+                raise RuntimeError('任务状态已改变，本次确认已取消')
+            if skip:
+                # The old target must not survive as a resumable paused goal.
+                if snapshot['state'] in {'navigating','navigation_failed'}:
+                    ok, message = await self._call_service(self._cancel_navigation_client, Trigger.Request())
+                    if not ok:
+                        raise RuntimeError(message)
+                self._release_task_height_for_manual_control()
+                result, skipped, upcoming = self._task_workflow.skip_current()
+                if result == 'next':
+                    await self._start_current_task_navigation()
+                else:
+                    self._showroom_single_task_active = False
+                message = f"已跳过{skipped['location']}" + ('，前往下一任务' if result == 'next' else '，本轮结束')
             else:
-                self._showroom_single_task_active = False
-            return web.json_response({
-                'success': True,
-                'message': (
-                    f"已跳过{skipped['location']}，正在前往下一任务"
-                    if result == 'next' else '最后一个未到达点位已跳过'
-                ),
-                'result': result,
-                'upcoming': upcoming,
-                'task_dispatch': self._task_workflow.snapshot(),
-            })
+                goal = NavigateToWaypoint.Request()
+                goal.name = snapshot['current']['location']
+                ok, message = await self._call_service(self._operator_arrival_client, goal)
+                if not ok:
+                    raise RuntimeError(message)
+            return web.json_response({'success': True, 'message': message,
+                                      'task_dispatch': self._task_workflow.snapshot()})
         except (RuntimeError, ValueError) as error:
             return web.json_response({'success': False, 'message': str(error)}, status=409)
+        finally:
+            # Do not release another request's lock when this one was rejected.
+            if 'generation' in locals():
+                self._task_intervention = False
+
+    async def _api_tasks_operator_arrival(self, request):
+        return await self._api_task_intervention(request)
+
+    async def _api_tasks_skip_current(self, request):
+        return await self._api_task_intervention(request, skip=True)
 
     async def _api_tasks_cancel(self, request):
         del request
-        if self._navigation_is_active() and self._pause_navigation_client.service_is_ready():
-            await self._call_service(self._pause_navigation_client, Trigger.Request())
-        self._task_workflow.cancel()
+        self._drive_session_generation += 1
+        self._navigation_paused_for_drive = False
+        self._pause_requested_for_drive = False
+        # Invalidate before awaiting the navigation service, so a concurrent
+        # head release cannot resume a pose belonging to this cancelled task.
+        with self._task_height_lock:
+            self._task_workflow.cancel()
+            if not self._pose_is_manual:
+                NavigationVrWebBridge._clear_task_pose_locked(self)
+        if self._cancel_navigation_client.service_is_ready():
+            await self._call_service(self._cancel_navigation_client, Trigger.Request())
         self._showroom_single_task_active = False
         self._speak_task('任务串已取消。')
         return web.json_response({
@@ -1803,6 +2532,9 @@ class NavigationVrWebBridge(VrWebBridge):
 
     async def _api_navigation_stop(self, request):
         del request
+        self._drive_session_generation += 1
+        self._navigation_paused_for_drive = False
+        self._pause_requested_for_drive = False
         task_state = str(self._task_workflow.snapshot().get('state', 'idle'))
         stop_client = (
             self._cancel_navigation_client
@@ -1817,7 +2549,7 @@ class NavigationVrWebBridge(VrWebBridge):
             task = self._task_workflow.operator_stopped_navigation()
             if task is not None:
                 message = (
-                    f"已中断前往{task['location']}；长按A重试，长按B跳过"
+                    f"已中断前往{task['location']}；长按A重试，长按B人工确认到达"
                 )
         return web.json_response({
             'success': success,
@@ -1971,6 +2703,263 @@ class NavigationVrWebBridge(VrWebBridge):
         finally:
             self._map_switch_in_progress = False
 
+    def _submit_delivery_chain(self, chain_name, order_key, confirmed_waypoints=None):
+        """Submit a named task chain from the live catalog as pending
+        confirmation (VR banner + A accept).  Returns the chain_trigger
+        note dict; raises RuntimeError/ValueError with the user-facing
+        reason when submission is not possible."""
+        self._refresh_idle_task_catalog()
+        if self._task_catalog_error:
+            raise ValueError(self._task_catalog_error)
+        template = next(
+            (item for item in self._task_templates
+             if item['name'] == chain_name), None,
+        )
+        if template is None:
+            raise ValueError(f'任务串不存在：{chain_name}')
+        if confirmed_waypoints is not None:
+            missing = sorted({item['location'] for item in template['tasks']} - set(confirmed_waypoints))
+            if missing:
+                raise ValueError('航点库缺少地点：' + '、'.join(missing))
+        self._task_workflow.submit(
+            f'配送机器人联动：{template["name"]}', template['tasks']
+        )
+        if confirmed_waypoints is not None:
+            # One operator gesture, one synchronous submit+confirm transition.
+            self._task_workflow.confirm(confirmed_waypoints)
+        self._showroom_single_task_active = False
+        self._speak_task(f'收到，{template["name"]}，这就出发。')
+        note = {
+            'event': 'submitted', 'chain': chain_name, 'order': order_key,
+            'total': int(template.get('task_count', len(template['tasks']))),
+            'at': time.time(),
+        }
+        self.get_logger().info(
+            f'delivery chain {chain_name} submitted for order {order_key}'
+        )
+        return note
+
+    def _delivery_chain_tick(self):
+        """Offer outbound jobs without replacing a pending decision or mission.
+
+        Decisions survive polling/status changes and browser reconnections
+        during this backend session. No motion is initiated by this timer.
+        """
+        snapshot = self._delivery_handoff.snapshot()
+        chain_name = str(snapshot.get('pickup_task_chain') or '').strip()
+        age = snapshot.get('last_success_age')
+        if not chain_name or age is None or age > 15 or snapshot.get('state') == 'unknown':
+            return
+        orders = snapshot.get('orders') or []
+        outbound = {'PICKUP_STARTED', 'PICKUP_AT_ROOM', 'PICKUP_TO_LAUNDRY', 'PICKUP_AT_LAUNDRY'}
+        with self._delivery_offer_lock:
+            offer = self._delivery_offer or {}
+            if offer.get('state') == 'offered':
+                if any(str(o.get('order_id') or o.get('task_id') or '') == offer['order']
+                       and o.get('status_code') in outbound for o in orders):
+                    return
+                self._delivery_offer = {**offer, 'state': 'expired'}
+            elif offer.get('state') == 'accepting':
+                return
+            # Inspect every order, not only the primary door-opening order.
+            for order in orders:
+                key = str(order.get('order_id') or order.get('task_id') or '')
+                if (not key or key in self._delivery_seen_orders
+                        or order.get('status_code') not in outbound):
+                    continue
+                self._delivery_seen_orders.add(key)
+                self._delivery_offer = {
+                    'state': 'offered', 'order': key, 'chain': chain_name,
+                    'room_no': order.get('room'), 'status': order.get('status_code'),
+                    'at': time.time(),
+                }
+                break
+
+    def _delivery_state_payload(self):
+        """Monitor snapshot plus the offer/note bookkeeping for the UI."""
+        payload = self._delivery_handoff.snapshot()
+        with self._delivery_offer_lock:
+            if self._delivery_offer is not None:
+                payload['offer'] = dict(self._delivery_offer)
+        if self._delivery_chain_note is not None:
+            payload['chain_trigger'] = self._delivery_chain_note
+        return payload
+
+    async def _api_delivery_pickup_chain_accept(self, request):
+        """The delivery-card long hold is the only confirmation step."""
+        try:
+            payload = await self._operator_payload(request)
+            self._delivery_chain_tick()
+            with self._delivery_offer_lock:
+                offer = dict(self._delivery_offer or {})
+                if offer.get('state') != 'offered' or payload.get('order') != offer.get('order'):
+                    raise RuntimeError('配送任务已变化，请查看最新卡片')
+                state = self._task_workflow.snapshot().get('state')
+                if state not in {'idle', 'cancelled', 'completed'} or self._navigation_is_active():
+                    raise RuntimeError('请先结束当前任务或导航，再接受配送任务')
+                with self._drive_lock:
+                    if self._drive_sample and self._drive_sample.get('deadman'):
+                        raise RuntimeError('请先退出底盘接管')
+                snapshot = self._delivery_handoff.snapshot()
+                age = snapshot.get('last_success_age')
+                if age is None or age > 15 or snapshot.get('state') == 'unknown':
+                    raise RuntimeError('配送状态连接未就绪，请稍后再试')
+                with self._nav_lock:
+                    if self._pose is None or str(self._relocalization_status.get('state', '')).lower() in {
+                            'failed', 'failure', 'aborted', 'rejected'}:
+                        raise RuntimeError('机器人定位尚未就绪，请先完成定位，再长按A')
+                    waypoints = list(self._waypoints)
+                # Reserve before any async navigation call; repeated A cannot resubmit.
+                self._delivery_offer = {**offer, 'state': 'accepting'}
+            self._submit_delivery_chain(
+                str(offer.get('chain') or ''), offer.get('order'), confirmed_waypoints=waypoints
+            )
+        except (RuntimeError, ValueError) as error:
+            with self._delivery_offer_lock:
+                if (self._delivery_offer or {}).get('state') == 'accepting':
+                    self._delivery_offer = offer
+            return web.json_response({
+                'success': False, 'message': str(error),
+                'delivery_handoff': self._delivery_state_payload(),
+            }, status=409)
+        with self._delivery_offer_lock:
+            self._delivery_offer = {**offer, 'state': 'accepted', 'at': time.time()}
+        try:
+            message = await self._start_current_task_navigation()
+            success = True
+        except (RuntimeError, ValueError) as error:
+            message = str(error)
+            success = False
+            self.get_logger().warning(f'Accepted delivery chain failed to start: {message}')
+        return web.json_response({
+            'success': success,
+            'message': message,
+            'delivery_handoff': self._delivery_state_payload(),
+            'task_dispatch': self._task_workflow.snapshot(),
+        }, status=200 if success else 409)
+
+    async def _api_delivery_pickup_chain_reject(self, request):
+        """Reject the offered delivery task: back to a clean view for this
+        order; it can still be started manually from the template menu."""
+        try:
+            payload = await self._operator_payload(request)
+            with self._delivery_offer_lock:
+                offer = self._delivery_offer or {}
+                if offer.get('state') != 'offered' or payload.get('order') != offer.get('order'):
+                    raise RuntimeError('配送任务已变化，请查看最新卡片')
+                self._delivery_offer = {**offer, 'state': 'rejected', 'at': time.time()}
+        except (RuntimeError, ValueError) as error:
+            return web.json_response({'success': False, 'message': str(error)}, status=409)
+        return web.json_response({
+            'success': True,
+            'message': '已忽略此配送任务',
+            'delivery_handoff': self._delivery_state_payload(),
+        })
+
+    async def _api_delivery_return_chain_start(self, request):
+        """Summon the delivery robot for the return leg and start the
+        configured return task chain (pending VR accept).
+
+        Fail-closed ordering: the dry-complete signal (which queues the
+        RETURN_TO_ROOM trip) must succeed first; the chain is only
+        submitted when the robot is actually coming, so the operator is
+        never sent to the loading point to wait for a robot that will not
+        arrive."""
+        del request
+        snapshot = self._delivery_handoff.snapshot()
+        chain_name = str(snapshot.get('return_task_chain') or '').strip()
+        success, message = await asyncio.to_thread(
+            self._delivery_handoff.request_dry_complete
+        )
+        if not success:
+            return web.json_response({
+                'success': False,
+                'message': f'未能通知配送机器人：{message}',
+                'delivery_handoff': self._delivery_handoff.snapshot(),
+            }, status=409)
+        if not chain_name:
+            return web.json_response({
+                'success': False,
+                'message': '未配置回程任务串（return_task_chain）',
+                'delivery_handoff': self._delivery_handoff.snapshot(),
+            }, status=409)
+        try:
+            self._delivery_chain_note = self._submit_delivery_chain(
+                chain_name, str(snapshot.get('order_id') or 'return')
+            )
+        except (RuntimeError, ValueError) as error:
+            self._delivery_chain_note = {
+                'event': 'failed', 'chain': chain_name,
+                'message': str(error), 'at': time.time(),
+            }
+            self.get_logger().warning(
+                f'delivery return chain start failed: {error}'
+            )
+            return web.json_response({
+                'success': False,
+                'message': f'配送机器人已呼出，但任务串未能启动：{error}',
+                'delivery_handoff': self._delivery_handoff.snapshot(),
+            }, status=409)
+        return web.json_response({
+            'success': True,
+            'message': f'已通知配送机器人，收到'
+                       f'{self._delivery_chain_note["total"]}项任务，按 A 接受',
+            'delivery_handoff': self._delivery_handoff.snapshot(),
+            'task_dispatch': self._task_workflow.snapshot(),
+        })
+
+    async def _api_delivery_handoff_open(self, request, action='open'):
+        try:
+            payload = await self._operator_payload(request)
+            expected = {k: str(payload.get(k) or '') for k in ('order_id', 'task_id', 'door_id')}
+            if not all(expected.values()):
+                raise RuntimeError('配送舱位未就绪，请刷新状态后重试')
+            if action == 'close' and payload.get('confirmed') is not True:
+                raise RuntimeError('请确认手臂及衣物已移开舱门，再确认关门')
+        except (ValueError, RuntimeError) as error:
+            return web.json_response({'success': False, 'message': str(error)}, status=409)
+        # The blocking POST runs in a worker thread so the web loop keeps
+        # serving VR clients; the monitor's OPENING flag plus its lock
+        # collapse duplicate triggers into a single in-flight request.
+        success, message = await asyncio.to_thread(
+            (self._delivery_handoff.request_close if action == 'close'
+             else self._delivery_handoff.request_open), expected=expected
+        )
+        return web.json_response({
+            'success': success,
+            'message': message,
+            'delivery_handoff': self._delivery_handoff.snapshot(),
+        }, status=200 if success else 409)
+
+    async def _api_delivery_handoff_close(self, request):
+        return await self._api_delivery_handoff_open(request, action='close')
+
+    async def _api_delivery_handoff_wash_complete(self, request):
+        del request
+        # Marks the washed order done (frees the slot, queues admin drying);
+        # never summons the robot.  Idempotent server-side.
+        success, message = await asyncio.to_thread(
+            self._delivery_handoff.request_wash_complete
+        )
+        return web.json_response({
+            'success': success,
+            'message': message,
+            'delivery_handoff': self._delivery_handoff.snapshot(),
+        }, status=200 if success else 409)
+
+    async def _api_delivery_handoff_dry_complete(self, request):
+        del request
+        # Writes the dry timestamp and queues the RETURN_TO_ROOM trip — this
+        # is the call that summons the delivery robot.  Idempotent server-side.
+        success, message = await asyncio.to_thread(
+            self._delivery_handoff.request_dry_complete
+        )
+        return web.json_response({
+            'success': success,
+            'message': message,
+            'delivery_handoff': self._delivery_handoff.snapshot(),
+        }, status=200 if success else 409)
+
     async def _serve(self):
         application = web.Application(client_max_size=64 * 1024)
         application.router.add_get('/api/config', self._api_config)
@@ -1997,6 +2986,33 @@ class NavigationVrWebBridge(VrWebBridge):
         application.router.add_get('/api/navigation/state', self._api_navigation_state)
         application.router.add_get('/api/navigation/map.png', self._api_navigation_map)
         application.router.add_post('/api/gripper/force', self._api_gripper_force)
+        application.router.add_post('/api/gripper/width', self._api_gripper_width)
+        application.router.add_post(
+            '/api/delivery-handoff/open', self._api_delivery_handoff_open
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/close', self._api_delivery_handoff_close
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/wash-complete',
+            self._api_delivery_handoff_wash_complete,
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/dry-complete',
+            self._api_delivery_handoff_dry_complete,
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/return-chain/start',
+            self._api_delivery_return_chain_start,
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/pickup-chain/accept',
+            self._api_delivery_pickup_chain_accept,
+        )
+        application.router.add_post(
+            '/api/delivery-handoff/pickup-chain/reject',
+            self._api_delivery_pickup_chain_reject,
+        )
         application.router.add_post('/api/navigation/waypoint', self._api_navigation_waypoint)
         application.router.add_post(
             '/api/navigation/waypoint/save', self._api_navigation_waypoint_save
@@ -2005,12 +3021,20 @@ class NavigationVrWebBridge(VrWebBridge):
             '/api/navigation/waypoint/delete', self._api_navigation_waypoint_delete
         )
         application.router.add_post('/api/navigation/stop', self._api_navigation_stop)
+        application.router.add_post('/api/navigation/release-drive', self._api_release_drive)
+        application.router.add_post('/api/tasks/operator-arrival', self._api_tasks_operator_arrival)
+        application.router.add_post('/api/tasks/skip-current', self._api_tasks_skip_current)
         application.router.add_post('/api/navigation/relocalize', self._api_navigation_relocalize)
         application.router.add_post(
             '/api/navigation/manual-relocalize', self._api_navigation_manual_relocalize
         )
         application.router.add_post('/api/navigation/map/switch', self._api_navigation_map_switch)
         application.router.add_post('/api/tasks/submit', self._api_tasks_submit)
+        application.router.add_get('/api/tasks/menu-catalog', self._api_task_menu_catalog)
+        application.router.add_post('/api/tasks/custom/start', self._api_custom_task_start)
+        application.router.add_post('/api/pose/preset', self._api_pose_preset)
+        application.router.add_post('/api/pose/stop', self._api_pose_stop)
+        application.router.add_post('/api/navigation/voice-enabled', self._api_voice_enabled)
         application.router.add_post(
             '/api/tasks/template/start', self._api_tasks_template_start
         )
@@ -2022,6 +3046,7 @@ class NavigationVrWebBridge(VrWebBridge):
         )
         application.router.add_post('/api/tasks/confirm', self._api_tasks_confirm)
         application.router.add_post('/api/tasks/complete', self._api_tasks_complete)
+        application.router.add_post('/api/tasks/retry-pose', self._api_tasks_retry_pose)
         application.router.add_post(
             '/api/tasks/retry-navigation-failure',
             self._api_tasks_retry_navigation_failure,
@@ -2031,6 +3056,7 @@ class NavigationVrWebBridge(VrWebBridge):
             self._api_tasks_skip_navigation_failure,
         )
         application.router.add_post('/api/tasks/cancel', self._api_tasks_cancel)
+        application.router.add_post('/api/session/exit', self._api_exit_vr)
         application.router.add_get('/monitor', self._monitor_index)
         application.router.add_get('/audience', self._audience_index)
         application.router.add_get('/show', self._audience_index)
@@ -2060,6 +3086,7 @@ class NavigationVrWebBridge(VrWebBridge):
         self._set_drive_sample({'deadman': False})
         if rclpy.ok():
             self._publish_stop()
+        self._delivery_handoff.stop()
         if self._precision_cloud_stream is not None:
             self._precision_cloud_stream.close()
         return super().destroy_node()
